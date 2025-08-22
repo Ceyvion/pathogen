@@ -1,0 +1,40 @@
+[
+  { "name": "Bellevue Hospital Center", "boroKey": "manhattan", "ll": [-73.975, 40.739], "beds": 844 },
+  { "name": "NYU Langone Health", "boroKey": "manhattan", "ll": [-73.974, 40.742], "beds": 1000 },
+  { "name": "Mount Sinai Hospital", "boroKey": "manhattan", "ll": [-73.953, 40.789], "beds": 1171 },
+  { "name": "NewYork-Presbyterian/Weill Cornell", "boroKey": "manhattan", "ll": [-73.956, 40.764], "beds": 862 },
+  { "name": "Mount Sinai West", "boroKey": "manhattan", "ll": [-73.986, 40.770], "beds": 505 },
+  { "name": "Lenox Hill Hospital", "boroKey": "manhattan", "ll": [-73.958, 40.773], "beds": 652 },
+  { "name": "Metropolitan Hospital Center", "boroKey": "manhattan", "ll": [-73.944, 40.785], "beds": 338 },
+  { "name": "Harlem Hospital Center", "boroKey": "manhattan", "ll": [-73.941, 40.813], "beds": 272 },
+
+  { "name": "NYP Brooklyn Methodist", "boroKey": "brooklyn", "ll": [-73.981, 40.668], "beds": 651 },
+  { "name": "Maimonides Medical Center", "boroKey": "brooklyn", "ll": [-73.996, 40.630], "beds": 711 },
+  { "name": "Kings County Hospital Center", "boroKey": "brooklyn", "ll": [-73.943, 40.655], "beds": 627 },
+  { "name": "SUNY Downstate University Hospital", "boroKey": "brooklyn", "ll": [-73.944, 40.656], "beds": 376 },
+  { "name": "Brookdale Hospital Medical Center", "boroKey": "brooklyn", "ll": [-73.908, 40.656], "beds": 530 },
+  { "name": "Wyckoff Heights Medical Center", "boroKey": "brooklyn", "ll": [-73.918, 40.700], "beds": 350 },
+  { "name": "Woodhull Medical Center", "boroKey": "brooklyn", "ll": [-73.943, 40.700], "beds": 388 },
+  { "name": "South Brooklyn Health (Coney Island)", "boroKey": "brooklyn", "ll": [-73.961, 40.585], "beds": 371 },
+  { "name": "Interfaith Medical Center", "boroKey": "brooklyn", "ll": [-73.947, 40.680], "beds": 287 },
+
+  { "name": "Elmhurst Hospital Center", "boroKey": "queens", "ll": [-73.882, 40.744], "beds": 545 },
+  { "name": "NewYork-Presbyterian Queens", "boroKey": "queens", "ll": [-73.826, 40.749], "beds": 535 },
+  { "name": "Jamaica Hospital Medical Center", "boroKey": "queens", "ll": [-73.807, 40.700], "beds": 424 },
+  { "name": "LIJ Forest Hills", "boroKey": "queens", "ll": [-73.844, 40.722], "beds": 312 },
+  { "name": "Mount Sinai Queens", "boroKey": "queens", "ll": [-73.932, 40.770], "beds": 235 },
+  { "name": "St. John's Episcopal Hospital", "boroKey": "queens", "ll": [-73.752, 40.598], "beds": 257 },
+
+  { "name": "Montefiore Medical Center (Moses)", "boroKey": "bronx", "ll": [-73.880, 40.880], "beds": 726 },
+  { "name": "Montefiore Einstein (Weiler)", "boroKey": "bronx", "ll": [-73.844, 40.852], "beds": 421 },
+  { "name": "Jacobi Medical Center", "boroKey": "bronx", "ll": [-73.846, 40.857], "beds": 457 },
+  { "name": "North Central Bronx Hospital", "boroKey": "bronx", "ll": [-73.879, 40.877], "beds": 215 },
+  { "name": "Lincoln Medical Center", "boroKey": "bronx", "ll": [-73.927, 40.817], "beds": 362 },
+  { "name": "St. Barnabas Hospital", "boroKey": "bronx", "ll": [-73.892, 40.845], "beds": 422 },
+  { "name": "BronxCare Health System", "boroKey": "bronx", "ll": [-73.909, 40.839], "beds": 641 },
+
+  { "name": "Staten Island University Hospital (North)", "boroKey": "staten_island", "ll": [-74.116, 40.614], "beds": 682 },
+  { "name": "Staten Island University Hospital (South)", "boroKey": "staten_island", "ll": [-74.242, 40.510], "beds": 210 },
+  { "name": "Richmond University Medical Center", "boroKey": "staten_island", "ll": [-74.105, 40.640], "beds": 470 }
+]
+

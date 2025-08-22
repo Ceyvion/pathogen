@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/map/nycmap.tsx","./src/phaser/canvasgame.tsx","./src/phaser/gamescene.ts","./src/state/store.ts","./src/state/types.ts","./src/ui/hud.tsx","./src/ui/components/bottomticker.tsx","./src/ui/components/leftstats.tsx","./src/ui/components/rightupgrades.tsx","./src/ui/components/topbar.tsx"],"errors":true,"version":"5.9.2"}

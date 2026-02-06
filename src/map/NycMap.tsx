@@ -539,9 +539,10 @@ export function NycMap() {
             const amt = (gs as any).patientZeroSeedAmount || 8000;
             if (gs.mode === 'architect') {
               // Seed into Exposed for a slower onset
-              (gs.actions as any).seedExposure?.(key, amt) ?? gs.actions.seedInfection(key, Math.floor(amt * 0.6));
-              gs.actions.addEvent(`Patient Zero established in ${gs.countries[key].name}`);
+              gs.actions.seedExposure(key, amt, `Patient Zero established in ${gs.countries[key].name}`);
             } else {
+              // Controller: the click determines both outbreak origin and the initial focus.
+              gs.actions.seedExposure(key, amt, `Outbreak detected in ${gs.countries[key].name}`);
               gs.actions.addEvent(`Starting focus: ${gs.countries[key].name}`);
             }
             gs.actions.selectCountry(key);
@@ -785,9 +786,9 @@ export function NycMap() {
             pickable: false,
             parameters: {
               // additive blending to make dots bloom together
-              [GL.BLEND]: true,
-              [GL.BLEND_FUNC]: [GL.SRC_ALPHA, GL.ONE, GL.ONE, GL.ONE_MINUS_SRC_ALPHA],
-              [GL.BLEND_EQUATION]: GL.FUNC_ADD,
+              blend: true,
+              blendFunc: [GL.SRC_ALPHA, GL.ONE, GL.ONE, GL.ONE_MINUS_SRC_ALPHA],
+              blendEquation: GL.FUNC_ADD,
             } as any,
             updateTriggers: { data: performance.now() },
           }) as any;
@@ -801,9 +802,9 @@ export function NycMap() {
             stroked: false,
             pickable: false,
             parameters: {
-              [GL.BLEND]: true,
-              [GL.BLEND_FUNC]: [GL.SRC_ALPHA, GL.ONE, GL.ONE, GL.ONE_MINUS_SRC_ALPHA],
-              [GL.BLEND_EQUATION]: GL.FUNC_ADD,
+              blend: true,
+              blendFunc: [GL.SRC_ALPHA, GL.ONE, GL.ONE, GL.ONE_MINUS_SRC_ALPHA],
+              blendEquation: GL.FUNC_ADD,
             } as any,
             updateTriggers: { data: performance.now() },
           }) as any;

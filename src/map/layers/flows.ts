@@ -23,9 +23,9 @@ export function makeFlowsLayer(opts: { data: Flow[]; t?: number }) {
     greatCircle: true,
     pickable: false,
     parameters: {
-      [GL.BLEND]: true,
-      [GL.BLEND_FUNC]: [GL.SRC_ALPHA, GL.ONE, GL.ONE, GL.ONE_MINUS_SRC_ALPHA],
-      [GL.BLEND_EQUATION]: GL.FUNC_ADD,
+      blend: true,
+      blendFunc: [GL.SRC_ALPHA, GL.ONE, GL.ONE, GL.ONE_MINUS_SRC_ALPHA],
+      blendEquation: GL.FUNC_ADD,
     } as any,
   });
 }
@@ -61,9 +61,9 @@ export function makeFlowSparksLayer(opts: { data: Flow[]; t: number }) {
     pickable: false,
     getFillColor: (d: any) => [255 * Math.min(1, d.iPrev * 40 + 0.2), 100, 80, d.alpha],
     parameters: {
-      [GL.BLEND]: true,
-      [GL.BLEND_FUNC]: [GL.SRC_ALPHA, GL.ONE, GL.ONE, GL.ONE_MINUS_SRC_ALPHA],
-      [GL.BLEND_EQUATION]: GL.FUNC_ADD,
+      blend: true,
+      blendFunc: [GL.SRC_ALPHA, GL.ONE, GL.ONE, GL.ONE_MINUS_SRC_ALPHA],
+      blendEquation: GL.FUNC_ADD,
     } as any,
   });
 }
@@ -81,7 +81,7 @@ export function makeBridgePathsLayer(opts: { data: BridgeFlow[] }) {
     getWidth: (d) => 1 + Math.min(6, d.daily / 30000),
     getColor: (d) => [255 * Math.min(1, d.iPrev * 40), 84, 84, 180],
     pickable: false,
-    parameters: { depthTest: false },
+    parameters: { depthTest: false } as any,
   });
 }
 
@@ -133,9 +133,9 @@ export function makeBridgeSparksLayer(opts: { data: BridgeFlow[]; t: number }) {
     getFillColor: (d: any) => [255 * Math.min(1, d.iPrev * 40 + 0.2), 100, 80, d.alpha],
     parameters: {
       depthTest: false,
-      [GL.BLEND]: true,
-      [GL.BLEND_FUNC]: [GL.SRC_ALPHA, GL.ONE, GL.ONE, GL.ONE_MINUS_SRC_ALPHA],
-      [GL.BLEND_EQUATION]: GL.FUNC_ADD,
+      blend: true,
+      blendFunc: [GL.SRC_ALPHA, GL.ONE, GL.ONE, GL.ONE_MINUS_SRC_ALPHA],
+      blendEquation: GL.FUNC_ADD,
     } as any,
   });
 }

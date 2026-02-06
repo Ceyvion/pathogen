@@ -77,7 +77,7 @@ describe('Start Flow Gating', () => {
     expect(s.mode).toBe('controller');
     expect(s.paused).toBe(true);
     expect(s.awaiting).toBe(true);
-    expect(s.countries.manhattan.E).toBeGreaterThan(0);
+    const anySeeded = Object.values(s.countries).some((c) => c.E > 0 || c.I > 0);
+    expect(anySeeded).toBe(false);
   });
 });
-

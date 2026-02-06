@@ -16,7 +16,7 @@ type Actions = {
   loadGame: () => void;
   addEvent: (text: string) => void;
   seedInfection: (target?: CountryID | 'all', amount?: number) => void;
-  seedExposure: (target?: CountryID | 'all', amount?: number) => void;
+  seedExposure: (target?: CountryID | 'all', amount?: number, label?: string) => void;
   setPolicy: (id: CountryID, policy: Country['policy']) => void;
   startNewGame: (mode: GameMode, opts?: {
     difficulty?: 'casual'|'normal'|'brutal';
@@ -529,7 +529,7 @@ export const useGameStore = create<GameStore>()(
         st.events.unshift('Seeded infections for demo');
       }),
       // Seed into Exposed for gentler onset (used by Patient Zero + architect starts)
-      seedExposure: (target?: CountryID | 'all', amount?: number) => set((st) => {
+      seedExposure: (target?: CountryID | 'all', amount?: number, label?: string) => set((st) => {
         const bump = amount ?? 10_000;
         const apply = (c: Country) => {
           const space = Math.max(0, c.S - 1);
@@ -542,7 +542,7 @@ export const useGameStore = create<GameStore>()(
         } else if (st.countries[target]) {
           apply(st.countries[target]);
         }
-        st.events.unshift('Seeded exposure');
+        st.events.unshift(label || 'Seeded exposure');
       }),
       setPolicy: (id, policy) => set((st) => { const c = st.countries[id]; if (c) c.policy = policy; }),
       saveGame: () => {
@@ -673,12 +673,14 @@ export const useGameStore = create<GameStore>()(
         if (mode === 'controller') {
           st.awaitingPatientZero = true;
           st.paused = true;
-          // Deterministic controller start: index case in Manhattan (no hidden randomness).
-          const index = 'manhattan' as CountryID;
-          const startExposure = 2500;
-          seedExposureInPlace(st as any, index, startExposure);
-          st.events.unshift(`Index case detected in ${st.countries[index].name}`);
-          st.events.unshift('Select a borough to set your initial focus');
+          // Controller start is player-driven: they choose where the outbreak begins (and focus).
+          const base =
+            st.difficulty === 'casual' ? 8000 :
+            st.difficulty === 'brutal' ? 4500 :
+            6000;
+          const amount = clampSeedAmount(opts?.seedAmount, base);
+          (st as any).patientZeroSeedAmount = amount;
+          st.events.unshift('Select a borough to begin the outbreak and set your initial focus');
         }
       }),
       addDNA: (delta) => set((st) => { st.dna = Math.max(0, st.dna + delta); }),

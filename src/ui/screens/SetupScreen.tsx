@@ -147,7 +147,7 @@ export function SetupScreen() {
         )}
         <div className="row" style={{ justifyContent: 'space-between', marginTop: 16, alignItems: 'center' }}>
           <div className="muted" style={{ fontSize: 12 }}>
-            {isArchitect ? 'Tip: Pick on Map to place Patient Zero precisely.' : 'Tip: Early ops in testing/tracing accelerates the cure.'}
+            {isArchitect ? 'Tip: Pick on Map to place Patient Zero precisely.' : 'Tip: After you begin, click a borough to start the scenario and set your initial focus.'}
           </div>
           <button className="btn" onClick={begin}>Begin</button>
         </div>

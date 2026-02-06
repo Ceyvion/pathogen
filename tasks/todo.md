@@ -32,8 +32,23 @@ When starting a new game, the simulation advances immediately and can generate i
 
 - [ ] Manual: Start Architect (pick) and do nothing for 30 seconds; confirm day/infections do not advance until you click a borough.
 - [ ] Manual: Start Architect (random/widespread); confirm outbreak is seeded as configured and starts immediately after seeding.
-- [ ] Manual: Start Controller; confirm intended behavior is consistent (no surprise outbreak before any explicit start condition).
+- [ ] Manual: Start Controller; confirm intended behavior is consistent (player chooses outbreak start; no surprise outbreak before any explicit start condition).
 - [x] Automated: run unit tests (Vitest) confirming no sim advance during awaiting.
+
+## Next: UX + Variety
+
+- [ ] Bubble pickup system (fix UI overlap + pacing):
+  - [ ] Placement rules: never spawn bubbles under UI chrome/menus; enforce a “safe map click zone”.
+  - [ ] Grace buffer: if a bubble would spawn under UI, auto-bank it into a tray for 3–5s.
+  - [ ] Accessibility toggle: optional auto-collect bubbles (balance via small penalty if desired).
+  - [ ] Spawn pacing: reduce spam, cap active bubbles, and/or drive spawn rate via a pacing/intensity model.
+- [ ] World event ticker overhaul:
+  - [ ] Add a state-reactive event system (templates + tags + cooldowns) that can output 100+ prewritten events.
+  - [ ] Include NYC-specific locations and institutions; keep tone mostly straight with occasional dark humor.
+  - [ ] Prevent “filler”: events must reference current mode, day, policies, hospitals, cure progress, deaths.
+- [ ] Plague type variety (force different minds, not skins):
+  - [ ] Add pathogen “type modules” that change mechanics (virus/bacteria/fungus/bioweapon).
+  - [ ] Ensure each type changes the optimal play loop (avoid one solved strategy).
 
 ## Review (Implementation Notes)
 
@@ -41,4 +56,5 @@ When starting a new game, the simulation advances immediately and can generate i
   - `tick()` returns early and clears the accumulator while awaiting.
   - `togglePause()` and `setPaused(false)` refuse to unpause while awaiting.
 - Architect `seedMode` is now honored (`pick`, `random`, `widespread`). `seedTarget` is supported to make random seeding testable/deterministic.
-- Controller no longer relies on background importations to "randomly" start the outbreak. It seeds a deterministic index case in Manhattan and waits for the player to pick a focus before starting the clock.
+- Controller no longer relies on background importations to "randomly" start the outbreak. The player selects the outbreak origin and focus; the clock starts after the click.
+- Fixed TypeScript correctness for `pacing`/`bubbleSpawnMs` state and deck.gl blending parameter keys (`blendFunc` instead of missing `GL.BLEND_FUNC`).

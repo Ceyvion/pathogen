@@ -52,6 +52,8 @@ export interface WorldState {
   paused: boolean;
   speed: 1 | 3 | 10;
   msPerDay: number;
+  pacing: 'slow'|'normal'|'fast';
+  bubbleSpawnMs: number;
   dna: number; // points for pathogen upgrades (architect) or ops points (controller)
   countries: Record<CountryID, Country>;
   selectedCountryId: CountryID | null;

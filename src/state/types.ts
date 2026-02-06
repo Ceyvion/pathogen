@@ -2,6 +2,8 @@ export type CountryID = string;
 
 export type GameMode = 'architect' | 'controller';
 
+export type PathogenType = 'virus' | 'bacteria' | 'fungus' | 'bioweapon';
+
 export interface Country {
   id: CountryID;
   name: string;
@@ -21,6 +23,16 @@ export interface Upgrade {
   prereqs?: string[];
   purchased?: boolean;
   desc?: string;
+}
+
+export type BubbleType = 'dna' | 'ops' | 'cure';
+
+export interface BankedPickup {
+  id: number;
+  type: BubbleType;
+  amount: number;
+  createdAtMs: number; // Date.now()-based timestamp
+  expiresAtMs: number; // Date.now()-based timestamp
 }
 
 export interface Params {
@@ -54,10 +66,18 @@ export interface WorldState {
   msPerDay: number;
   pacing: 'slow'|'normal'|'fast';
   bubbleSpawnMs: number;
+  autoCollectBubbles: boolean;
+  bankedPickups: BankedPickup[];
   dna: number; // points for pathogen upgrades (architect) or ops points (controller)
   countries: Record<CountryID, Country>;
   selectedCountryId: CountryID | null;
   mode: GameMode;
+  pathogenType: PathogenType;
+  mutationDebt: number; // virus mechanic (0..100)
+  antibioticResistance: number; // bacteria mechanic (0..1)
+  fungusBurstDaysLeft: number; // fungus mechanic
+  bioweaponVolatility: number; // bioweapon mechanic (0..1)
+  cordonDaysLeft: Partial<Record<CountryID, number>>; // controller containment tool
   cureProgress: number; // 0..100
   difficulty: 'casual'|'normal'|'brutal';
   params: Params;

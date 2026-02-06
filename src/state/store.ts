@@ -1,14 +1,20 @@
 import { create } from 'zustand';
 import { playMilestone } from '../audio/sfx';
 import { immer } from 'zustand/middleware/immer';
-import type { Country, CountryID, TravelEdge, Upgrade, WorldState, GameMode, Story, GeneId } from './types';
+import type { Country, CountryID, TravelEdge, Upgrade, WorldState, GameMode, Story, GeneId, BubbleType, PathogenType, BankedPickup, Params } from './types';
 import { STORIES } from '../story/stories';
+import { maybeGenerateWorldEvent } from '../events/worldEvents';
 
 type Actions = {
   setSpeed: (s: 1 | 3 | 10) => void;
   togglePause: () => void;
   setPaused: (v: boolean) => void;
   setPacing: (p: 'slow'|'normal'|'fast') => void;
+  setAutoCollectBubbles: (v: boolean) => void;
+  bankPickup: (type: BubbleType, amount: number, ttlMs?: number) => void;
+  collectBankedPickup: (id: number) => void;
+  purgeExpiredPickups: (nowMs: number) => void;
+  collectPickup: (type: BubbleType, amount: number) => void;
   selectCountry: (id: CountryID | null) => void;
   tick: (dtMs: number) => void;
   purchaseUpgrade: (id: string) => void;
@@ -18,10 +24,12 @@ type Actions = {
   seedInfection: (target?: CountryID | 'all', amount?: number) => void;
   seedExposure: (target?: CountryID | 'all', amount?: number, label?: string) => void;
   setPolicy: (id: CountryID, policy: Country['policy']) => void;
+  deployCordon: (id: CountryID) => void;
   startNewGame: (mode: GameMode, opts?: {
     difficulty?: 'casual'|'normal'|'brutal';
     genes?: GeneId[];
     storyId?: string;
+    pathogenType?: PathogenType;
     // optional campaign-specific setup
     seedMode?: 'pick'|'random'|'widespread';
     seedTarget?: CountryID;
@@ -39,12 +47,26 @@ export type GameStore = WorldState & { actions: Actions };
 // Persistent accumulator for fixed-step integration. Without this, 1× (~16ms frames)
 // rarely reaches the 50ms step threshold, making time appear stuck until 3×/10×.
 let __simAccMs = 0;
+let __pickupId = 1;
 
 const BORO_IDS = ['manhattan', 'brooklyn', 'queens', 'bronx', 'staten_island'] as const satisfies readonly CountryID[];
 
 function clampSeedAmount(n: unknown, fallback: number) {
   const v = typeof n === 'number' && Number.isFinite(n) ? n : fallback;
   return Math.max(300, Math.min(60_000, Math.floor(v)));
+}
+
+function clampPct(v: number) {
+  return Math.max(0, Math.min(100, v));
+}
+
+function applyPickupReward(st: { mode: GameMode; dna: number; cureProgress: number }, type: BubbleType, amount: number) {
+  if (type === 'cure') {
+    const sign = st.mode === 'controller' ? 1 : -1;
+    st.cureProgress = clampPct(st.cureProgress + sign * amount);
+    return;
+  }
+  st.dna = Math.max(0, st.dna + amount);
 }
 
 function seedExposureInPlace(
@@ -96,6 +118,72 @@ const initialCountries = (): Record<CountryID, Country> => {
   };
 };
 
+function baseParams(): Params {
+  return {
+    beta: 0.22,
+    sigma: 1 / 5.5,
+    gammaRec: 1 / 9,
+    muBase: 0.00035,
+    seasonalityAmp: 0.15,
+    seasonalityPhase: 15,
+    hospRate: 0.03,
+    dischargeRate: 0.12,
+    hospCapacityPerK: 4.0,
+    mobilityScale: 1,
+    importationPerDay: 1,
+    variantTransMult: 1,
+    symFrac: 0.65,
+    symContactMul: 0.7,
+    severityMobilityFactor: 0.5,
+    // early-game pacing: short grace and gradual ramp
+    startRampDelayDays: 6,
+    startRampDurationDays: 35,
+    earlyPointBoostDays: 10,
+    earlyPointBoostMul: 1.4,
+  };
+}
+
+function paramsForType(type: PathogenType): Params {
+  const p = baseParams();
+  if (type === 'virus') {
+    // Baseline: quick drift, moderate severity.
+    return p;
+  }
+  if (type === 'bacteria') {
+    // Slower transmission, longer infection, harder cure.
+    p.beta *= 0.82;
+    p.sigma *= 0.9;
+    p.gammaRec *= 0.75;
+    p.muBase *= 0.9;
+    p.importationPerDay *= 0.7;
+    p.startRampDelayDays = 7;
+    p.startRampDurationDays = 42;
+    return p;
+  }
+  if (type === 'fungus') {
+    // Borders/chokepoints matter; fewer random sparks but bursts.
+    p.beta *= 0.65;
+    p.sigma *= 0.8;
+    p.gammaRec *= 0.85;
+    p.importationPerDay = 0;
+    p.mobilityScale *= 0.9;
+    p.symFrac = Math.min(0.8, p.symFrac * 0.8);
+    p.startRampDelayDays = 5;
+    p.startRampDurationDays = 28;
+    return p;
+  }
+  // bioweapon
+  p.beta *= 0.95;
+  p.sigma *= 1.15;
+  p.gammaRec *= 0.9;
+  p.muBase *= 2.0;
+  p.hospRate *= 1.15;
+  p.importationPerDay *= 0.5;
+  p.startRampDelayDays = 4;
+  p.startRampDurationDays = 22;
+  return p;
+}
+
 const baseUpgradesArchitect = (): Record<string, Upgrade> => ({
   tx1: { id: 'tx1', name: 'Aerosol Stability', branch: 'transmission', cost: 8, desc: '+10% transmission', effects: { betaMul: 1.10 } },
   tx2: { id: 'tx2', name: 'Surface Persistence', branch: 'transmission', cost: 16, desc: '+12% transmission', effects: { betaMul: 1.12 }, prereqs: ['tx1'] },
@@ -119,6 +207,142 @@ const baseUpgradesController = (): Record<string, Upgrade> => ({
   ops6: { id: 'ops6', name: 'Vaccine R&D', branch: 'abilities', cost: 18, desc: 'Accelerate cure (+25%) and research (+0.25%/day)', effects: { cureRateMul: 1.25, cureAddPerDay: 0.25 } as any },
   ops7: { id: 'ops7', name: 'Vaccine Manufacturing', branch: 'abilities', cost: 22, desc: 'Accelerate cure (+35%) and research (+0.35%/day)', effects: { cureRateMul: 1.35, cureAddPerDay: 0.35 } as any, prereqs: ['ops6'] },
 });
+
+function typeSpecificUpgrades(mode: GameMode, pathogenType: PathogenType): Record<string, Upgrade> {
+  if (mode === 'architect') {
+    if (pathogenType === 'virus') {
+      return {
+        vx_stab1: {
+          id: 'vx_stab1',
+          name: 'Genome Stabilization',
+          branch: 'abilities',
+          cost: 12,
+          desc: 'Manage mutation debt: fewer bad mutations, faster debt decay.',
+          effects: { mutationChanceMul: 0.85, mutationDebtDecayAdd: 1 } as any,
+        },
+        vx_stab2: {
+          id: 'vx_stab2',
+          name: 'Error Checking',
+          branch: 'abilities',
+          cost: 18,
+          desc: 'Further stabilize: reduced mutation chance and faster debt burn-off.',
+          effects: { mutationChanceMul: 0.8, mutationDebtDecayAdd: 2 } as any,
+          prereqs: ['vx_stab1'],
+        },
+      };
+    }
+    if (pathogenType === 'bacteria') {
+      return {
+        bac_plasmid: {
+          id: 'bac_plasmid',
+          name: 'Plasmid Exchange',
+          branch: 'abilities',
+          cost: 14,
+          desc: 'Resistance builds faster (slower cure), but costs speed.',
+          effects: { resistancePressureMul: 1.25, betaMul: 0.96 } as any,
+        },
+        bac_biofilm: {
+          id: 'bac_biofilm',
+          name: 'Biofilm Formation',
+          branch: 'symptoms',
+          cost: 18,
+          desc: 'Harder to clear; resistance persists.',
+          effects: { gammaRecMul: 0.92, resistanceDecayAdd: -0.5 } as any,
+        },
+      };
+    }
+    if (pathogenType === 'fungus') {
+      return {
+        fun_spore1: {
+          id: 'fun_spore1',
+          name: 'Spore Reservoir',
+          branch: 'abilities',
+          cost: 12,
+          desc: 'More frequent spore bursts (weather still matters).',
+          effects: { fungusBurstChanceMul: 1.35 } as any,
+        },
+        fun_spore2: {
+          id: 'fun_spore2',
+          name: 'Long-Haul Spores',
+          branch: 'abilities',
+          cost: 18,
+          desc: 'Spore bursts last longer.',
+          effects: { fungusBurstDurationAdd: 1 } as any,
+          prereqs: ['fun_spore1'],
+        },
+      };
+    }
+    // bioweapon
+    return {
+      bio_stable: {
+        id: 'bio_stable',
+        name: 'Stabilized Payload',
+        branch: 'abilities',
+        cost: 16,
+        desc: 'Slower volatility ramp: more predictable spread, fewer sudden spikes.',
+        effects: { bioweaponVolatilityRateMul: 0.75, betaMul: 1.03 } as any,
+      },
+    };
+  }
+
+  // controller
+  if (pathogenType === 'virus') {
+    return {
+      cvx_seq: {
+        id: 'cvx_seq',
+        name: 'Genomic Surveillance',
+        branch: 'abilities',
+        cost: 12,
+        desc: 'Reduces mutation churn; improves research slightly.',
+        effects: { mutationChanceMul: 0.9, cureAddPerDay: 0.05 } as any,
+      },
+    };
+  }
+  if (pathogenType === 'bacteria') {
+    return {
+      cbac_stew: {
+        id: 'cbac_stew',
+        name: 'Antibiotic Stewardship',
+        branch: 'symptoms',
+        cost: 10,
+        desc: 'Resistance decays faster; slows resistance buildup.',
+        effects: { resistanceDecayAdd: 1.5, resistancePressureMul: 0.85 } as any,
+      },
+    };
+  }
+  if (pathogenType === 'fungus') {
+    return {
+      cfun_vent: {
+        id: 'cfun_vent',
+        name: 'Ventilation Blitz',
+        branch: 'symptoms',
+        cost: 12,
+        desc: 'Cuts spore-burst frequency and duration (at a cost).',
+        effects: { fungusBurstChanceMul: 0.75, fungusBurstDurationAdd: -1, cureAddPerDay: -0.02 } as any,
+      },
+    };
+  }
+  // bioweapon
+  return {
+    cbio_cordon1: {
+      id: 'cbio_cordon1',
+      name: 'Cordon Logistics',
+      branch: 'abilities',
+      cost: 12,
+      desc: 'Containment cordons last longer.',
+      effects: { cordonDaysAdd: 2 } as any,
+    },
+    cbio_cordon2: {
+      id: 'cbio_cordon2',
+      name: 'Rapid Cordon Teams',
+      branch: 'abilities',
+      cost: 16,
+      desc: 'Containment cordons cost less to deploy.',
+      effects: { cordonCostDelta: -1 } as any,
+      prereqs: ['cbio_cordon1'],
+    },
+  };
+}
 
 function upgradesFor(mode: GameMode, campaignId?: string): Record<string, Upgrade> {
   if (mode === 'architect') {
@@ -171,7 +395,12 @@ function upgradesFor(mode: GameMode, campaignId?: string): Record<string, Upgrad
   }
 }
 
-const MAX_EVENTS = 50;
+const MAX_EVENTS = 120;
+const MAX_BANKED_PICKUPS = 8;
+
+const initialAutoCollect = (() => {
+  try { return localStorage.getItem('autoCollectBubblesV1') === '1'; } catch { return false; }
+})();
 
 // Radiation-model-inspired commuting flows across the five boroughs
 const boroughLL: Record<CountryID, [number, number]> = {
@@ -241,40 +470,27 @@ export const useGameStore = create<GameStore>()(
     day: 0,
     paused: false,
     speed: 1,
-    msPerDay: 2600, // slower default pacing: ~2.6s per in-game day at 1x
+    msPerDay: 2400, // ~2.4s per in-game day at 1x
     pacing: 'normal' as 'slow'|'normal'|'fast',
-    bubbleSpawnMs: 1400,
+    bubbleSpawnMs: 2200,
+    autoCollectBubbles: initialAutoCollect,
+    bankedPickups: [],
     dna: 0,
     countries: initialCountries(),
     selectedCountryId: null,
     mode: 'architect',
+    pathogenType: 'virus',
+    mutationDebt: 0,
+    antibioticResistance: 0,
+    fungusBurstDaysLeft: 0,
+    bioweaponVolatility: 0,
+    cordonDaysLeft: {},
     cureProgress: 0,
     difficulty: 'normal',
     story: undefined,
     peakI: 0,
-    // Advanced SEIR params
-    params: {
-      beta: 0.22,
-      sigma: 1 / 5.5,
-      gammaRec: 1 / 9,
-      muBase: 0.00035,
-      seasonalityAmp: 0.15,
-      seasonalityPhase: 15,
-      hospRate: 0.03,
-      dischargeRate: 0.12,
-      hospCapacityPerK: 4.0,
-      mobilityScale: 1,
-      importationPerDay: 1,
-      variantTransMult: 1,
-      symFrac: 0.65,
-      symContactMul: 0.7,
-      severityMobilityFactor: 0.5,
-      // early-game pacing: short grace and gradual ramp
-      startRampDelayDays: 6,
-      startRampDurationDays: 35,
-      earlyPointBoostDays: 10,
-      earlyPointBoostMul: 1.4,
-    },
+    // Advanced SEIR params (set per pathogen type on new game)
+    params: paramsForType('virus'),
     upgrades: baseUpgradesArchitect(),
     events: [],
     travel: travelEdges(),
@@ -294,9 +510,36 @@ export const useGameStore = create<GameStore>()(
       }),
       setPacing: (p) => set((st) => {
         st.pacing = p;
-        if (p === 'slow') { st.msPerDay = 3000; st.bubbleSpawnMs = 1900; }
-        else if (p === 'fast') { st.msPerDay = 1200; st.bubbleSpawnMs = 1300; }
-        else { st.msPerDay = 2200; st.bubbleSpawnMs = 1600; }
+        if (p === 'slow') { st.msPerDay = 3200; st.bubbleSpawnMs = 2800; }
+        else if (p === 'fast') { st.msPerDay = 1400; st.bubbleSpawnMs = 1700; }
+        else { st.msPerDay = 2400; st.bubbleSpawnMs = 2200; }
+      }),
+      setAutoCollectBubbles: (v) => set((st) => {
+        st.autoCollectBubbles = v;
+        try { localStorage.setItem('autoCollectBubblesV1', v ? '1' : '0'); } catch {}
+      }),
+      bankPickup: (type, amount, ttlMs = 5000) => set((st) => {
+        if (st.bankedPickups.length >= MAX_BANKED_PICKUPS) {
+          // drop oldest to preserve "grace buffer" feel without infinite stacking
+          st.bankedPickups.shift();
+        }
+        const now = Date.now();
+        const item: BankedPickup = { id: __pickupId++, type, amount, createdAtMs: now, expiresAtMs: now + ttlMs };
+        st.bankedPickups.push(item);
+      }),
+      purgeExpiredPickups: (nowMs) => set((st) => {
+        if (!st.bankedPickups.length) return;
+        st.bankedPickups = st.bankedPickups.filter((p) => p.expiresAtMs > nowMs);
+      }),
+      collectBankedPickup: (id) => set((st) => {
+        const idx = st.bankedPickups.findIndex((p) => p.id === id);
+        if (idx < 0) return;
+        const p = st.bankedPickups[idx];
+        st.bankedPickups.splice(idx, 1);
+        applyPickupReward(st, p.type, p.amount);
+      }),
+      collectPickup: (type, amount) => set((st) => {
+        applyPickupReward(st, type, amount);
       }),
       selectCountry: (id) => set((st) => { st.selectedCountryId = id; }),
       addEvent: (text) => set((st) => { st.events.unshift(text); if (st.events.length > MAX_EVENTS) st.events.pop(); }),
@@ -340,6 +583,13 @@ export const useGameStore = create<GameStore>()(
             let symFracMulUp = 1; // symptomatic fraction modifier
             let symContactMulUp2 = 1; // symptomatic contact multiplier modifier
             let severityMobilityMulUp = 1; // severity mobility scaling modifier
+            let mutationDebtDecayAdd = 0;
+            let mutationChanceMul = 1;
+            let resistanceDecayAdd = 0;
+            let resistancePressureMul = 1;
+            let fungusBurstChanceMul = 1;
+            let fungusBurstDurationAdd = 0;
+            let bioweaponVolatilityRateMul = 1;
             for (const u of Object.values(state.upgrades)) {
               if (!u.purchased) continue;
               const e = u.effects;
@@ -357,6 +607,13 @@ export const useGameStore = create<GameStore>()(
               if ((e as any).symFracMul) symFracMulUp *= (e as any).symFracMul;
               if ((e as any).symContactMul) symContactMulUp2 *= (e as any).symContactMul;
               if ((e as any).severityMobilityMul) severityMobilityMulUp *= (e as any).severityMobilityMul;
+              if ((e as any).mutationDebtDecayAdd) mutationDebtDecayAdd += (e as any).mutationDebtDecayAdd;
+              if ((e as any).mutationChanceMul) mutationChanceMul *= (e as any).mutationChanceMul;
+              if ((e as any).resistanceDecayAdd) resistanceDecayAdd += (e as any).resistanceDecayAdd;
+              if ((e as any).resistancePressureMul) resistancePressureMul *= (e as any).resistancePressureMul;
+              if ((e as any).fungusBurstChanceMul) fungusBurstChanceMul *= (e as any).fungusBurstChanceMul;
+              if ((e as any).fungusBurstDurationAdd) fungusBurstDurationAdd += (e as any).fungusBurstDurationAdd;
+              if ((e as any).bioweaponVolatilityRateMul) bioweaponVolatilityRateMul *= (e as any).bioweaponVolatilityRateMul;
             }
             const p = state.params as any;
             // seasonality
@@ -365,6 +622,16 @@ export const useGameStore = create<GameStore>()(
             const symFracEff = Math.max(0, Math.min(1, p.symFrac * symFracMulUp));
             const symContactEff = Math.max(0, Math.min(1, p.symContactMul * symContactMulUp2));
             const sevMobEff = Math.max(0, p.severityMobilityFactor * severityMobilityMulUp);
+
+            // Pathogen-type mechanics.
+            const isFungusBurst = state.pathogenType === 'fungus' && state.fungusBurstDaysLeft > 0;
+            const fungusBetaMul = isFungusBurst ? 1.35 : 1;
+            const fungusMobilityMul = isFungusBurst ? 1.25 : 1;
+
+            const bioVol = state.pathogenType === 'bioweapon' ? state.bioweaponVolatility : 0;
+            const bioweaponMuMul = 1 + bioVol * 1.4;
+            const bioweaponBetaMul = 1 - bioVol * 0.15;
+            const bioweaponHospMul = 1 + bioVol * 0.5;
 
             // helper: mild stochastic jitter to emulate demographic noise
             const jitter = (x: number, amp = 0.06) => x <= 0 ? 0 : Math.max(0, x * (1 + (Math.random() * 2 - 1) * amp));
@@ -380,15 +647,15 @@ export const useGameStore = create<GameStore>()(
               const symPrev = symFracEff * (c.I / N);
               const symContact = 1 - symPrev * (1 - symContactEff);
               const contactMul = policyContactMul * symContact;
-              const betaEff = p.beta * betaMulUp * p.variantTransMult * season * contactMul;
+              const betaEff = p.beta * betaMulUp * p.variantTransMult * season * contactMul * fungusBetaMul * bioweaponBetaMul;
               const sigma = p.sigma * sigmaMulUp;
               const gammaRec = p.gammaRec * gammaRecMulUp;
-              let mu = p.muBase * muMulUp;
+              let mu = p.muBase * muMulUp * bioweaponMuMul;
 
               // Hospital flows
               const symptomaticI = symFracEff * c.I;
               // Admissions should reflect current symptomatic burden; do not gate by early-game ramp
-              const newHosp = (p.hospRate * hospRateMulUp) * symptomaticI * dtDays;
+              const newHosp = (p.hospRate * hospRateMulUp * bioweaponHospMul) * symptomaticI * dtDays;
               const discharges = Math.min(c.H, (p.dischargeRate * dischargeMulUp) * c.H * dtDays);
               c.H += newHosp - discharges;
               c.R += discharges;
@@ -426,7 +693,10 @@ export const useGameStore = create<GameStore>()(
               const from = state.countries[edge.from];
               const to = state.countries[edge.to];
               if (!from || !to) continue;
-              const travelToday = edge.daily * p.mobilityScale * dtDays;
+              const cordonFrom = state.cordonDaysLeft?.[edge.from] || 0;
+              const cordonTo = state.cordonDaysLeft?.[edge.to] || 0;
+              const cordonMul = (cordonFrom > 0 || cordonTo > 0) ? 0.15 : 1;
+              const travelToday = edge.daily * p.mobilityScale * fungusMobilityMul * cordonMul * dtDays;
               if (travelToday <= 0) continue;
               const baseTravel = from.policy === 'open' ? 1.0 : from.policy === 'advisory' ? 0.6 : from.policy === 'restrictions' ? 0.3 : 0.1;
               let fromMul = 1 - (1 - baseTravel) / policyResistMulUp;
@@ -462,21 +732,138 @@ export const useGameStore = create<GameStore>()(
             const baseModeRaw = state.mode === 'controller' ? 0.25 : 0.02; // % per day base
             const baseMode = state.difficulty === 'casual' ? baseModeRaw * 1.2 : state.difficulty === 'brutal' ? baseModeRaw * 0.8 : baseModeRaw;
             let curePerDay = (baseMode + prevalenceTerm) * cureRateMul + cureAddPerDay;
+            if (state.pathogenType === 'bacteria') {
+              curePerDay *= (1 - 0.65 * Math.max(0, Math.min(1, state.antibioticResistance)));
+            }
             let cureDelta = curePerDay * dtDays;
             state.cureProgress = Math.min(100, state.cureProgress + cureDelta);
 
             // track peak I
             if (totalI > state.peakI) state.peakI = totalI;
 
+            // Update pathogen-type subsystem state (continuous).
+            const prevalence = totalI / Math.max(1, totalPop);
+            if (state.pathogenType === 'bacteria') {
+              // Selection pressure rises with prevalence and cure progress; decays slowly over time.
+              const pressureBase = 0.02 + prevalence * 0.35 + (state.cureProgress / 100) * 0.06;
+              const pressure = pressureBase * Math.max(0, Math.min(2.5, resistancePressureMul));
+              const decay = Math.max(0, 0.018 + resistanceDecayAdd * 0.01);
+              state.antibioticResistance = Math.max(0, Math.min(1, state.antibioticResistance + dtDays * (pressure - decay)));
+            }
+            if (state.pathogenType === 'bioweapon') {
+              // Volatility ramps with prevalence; higher volatility increases lethality and suppresses spread.
+              const target = Math.max(0, Math.min(1, 0.1 + prevalence * 2.4));
+              const rate = 0.6 * Math.max(0.2, Math.min(2.5, bioweaponVolatilityRateMul));
+              state.bioweaponVolatility = Math.max(0, Math.min(1, state.bioweaponVolatility + (target - state.bioweaponVolatility) * dtDays * rate));
+            }
+
             // daily event (integer day boundary)
             const prevDay = Math.floor((state.t - stepMs) / state.msPerDay);
             const nowDay = Math.floor(state.t / state.msPerDay);
             if (nowDay !== prevDay) {
+              // Countdown transient systems once per day.
+              for (const k of Object.keys(state.cordonDaysLeft || {})) {
+                const days = state.cordonDaysLeft[k as any] || 0;
+                if (days <= 0) continue;
+                const next = days - 1;
+                if (next <= 0) {
+                  delete state.cordonDaysLeft[k as any];
+                  const name = state.countries[k as any]?.name || k;
+                  state.events.unshift(`Containment cordon lifted in ${name}`);
+                } else {
+                  state.cordonDaysLeft[k as any] = next;
+                }
+              }
+
+              if (state.pathogenType === 'fungus') {
+                if (state.fungusBurstDaysLeft > 0) {
+                  state.fungusBurstDaysLeft -= 1;
+                  if (state.fungusBurstDaysLeft === 0) state.events.unshift('Spore burst subsides');
+                } else {
+                  // Weather-driven burst chance (seasonality influences it).
+                  const wet = Math.max(0, season - 1); // 0..~0.15
+                  const chance = (0.06 + wet * 0.8) * Math.max(0, Math.min(3, fungusBurstChanceMul));
+                  if (Math.random() < chance) {
+                    const dur = Math.max(1, Math.min(6, 2 + Math.round(fungusBurstDurationAdd)));
+                    state.fungusBurstDaysLeft = dur;
+                    state.events.unshift(`Spore burst: airborne spread surges for ${dur} days`);
+                  }
+                }
+              }
+
+              if (state.pathogenType === 'virus') {
+                // Debt decays daily; big debt increases negative-mutation likelihood.
+                state.mutationDebt = Math.max(0, state.mutationDebt - (1 + Math.max(0, mutationDebtDecayAdd)));
+                const debt = state.mutationDebt;
+                const chance = (0.09 + debt * 0.0025) * Math.max(0.6, Math.min(1.8, mutationChanceMul));
+                if (Math.random() < chance) {
+                  const badBias = Math.min(0.75, debt / 120);
+                  const isBad = Math.random() < badBias;
+                  if (isBad) {
+                    // Backfire: more lethal or less transmissible.
+                    if (Math.random() < 0.5) {
+                      state.params.variantTransMult = Math.max(0.6, state.params.variantTransMult * 0.94);
+                      state.events.unshift('Mutation backfire: reduced transmissibility');
+                    } else {
+                      state.params.muBase = Math.min(0.01, state.params.muBase * 1.12);
+                      state.events.unshift('Mutation backfire: higher lethality');
+                    }
+                  } else {
+                    if (Math.random() < 0.6) {
+                      state.params.variantTransMult = Math.min(2.0, state.params.variantTransMult * 1.06);
+                      state.events.unshift('Mutation: increased transmissibility');
+                    } else {
+                      state.params.sigma = Math.min(1, state.params.sigma * 1.05);
+                      state.events.unshift('Mutation: shorter incubation');
+                    }
+                  }
+                }
+              }
+
+              // Mode enforcement: in Architect mode, the world reacts automatically via policy shifts.
+              if (state.mode === 'architect') {
+                const rank: Record<Country['policy'], number> = { open: 0, advisory: 1, restrictions: 2, lockdown: 3 };
+                const unrank: Country['policy'][] = ['open', 'advisory', 'restrictions', 'lockdown'];
+                let policyHeadline: string | null = null;
+                for (const c of Object.values(state.countries)) {
+                  const iPer100k = (c.I / Math.max(1, c.pop)) * 100_000;
+                  const cap = (state.params.hospCapacityPerK / 1000) * Math.max(1, c.pop);
+                  const load = cap > 0 ? (c.H / cap) : 0;
+                  let desired: Country['policy'] = 'open';
+                  if (load >= 1.15 || iPer100k >= 650) desired = 'lockdown';
+                  else if (load >= 0.85 || iPer100k >= 260) desired = 'restrictions';
+                  else if (iPer100k >= 90) desired = 'advisory';
+
+                  const cur = c.policy;
+                  if (rank[desired] > rank[cur]) {
+                    c.policy = desired;
+                    if (!policyHeadline && (desired === 'lockdown' || c.id === state.selectedCountryId)) {
+                      policyHeadline = `Policy tightened in ${c.name}: ${cur} -> ${desired}`;
+                    }
+                  } else if (rank[desired] < rank[cur]) {
+                    // De-escalate slowly only when things are genuinely calm.
+                    if (iPer100k < 25 && load < 0.35) {
+                      const next = unrank[Math.max(0, rank[cur] - 1)];
+                      c.policy = next;
+                      if (!policyHeadline && c.id === state.selectedCountryId) {
+                        policyHeadline = `Policy eased in ${c.name}: ${cur} -> ${next}`;
+                      }
+                    }
+                  }
+                }
+                if (policyHeadline) state.events.unshift(policyHeadline);
+              }
+
               const I = Object.values(state.countries).reduce((s, c) => s + c.I, 0);
-            const per100k = (I / Math.max(1, totalPop)) * 100_000;
-            state.events.unshift(`Day ${nowDay}: I=${I.toFixed(0)} (${per100k.toFixed(1)}/100k) | Cure ${state.cureProgress.toFixed(1)}%`);
+              const per100k = (I / Math.max(1, totalPop)) * 100_000;
+              state.events.unshift(`Day ${nowDay}: I=${I.toFixed(0)} (${per100k.toFixed(1)}/100k) | Cure ${state.cureProgress.toFixed(1)}%`);
+
+              // World-flavor ticker line (reactive, non-repeating via shuffle-bag).
+              const worldLine = maybeGenerateWorldEvent(state);
+              if (worldLine) state.events.unshift(worldLine);
+
               try { playMilestone('day'); } catch {}
-              if (state.events.length > MAX_EVENTS) state.events.pop();
+              while (state.events.length > MAX_EVENTS) state.events.pop();
               // evaluate story objectives (simple completion only)
               if (state.story) {
                 const allMet = state.story.objectives.every((o) => {
@@ -510,8 +897,22 @@ export const useGameStore = create<GameStore>()(
         if (!up || up.purchased) return;
         if (up.prereqs && up.prereqs.some((pid) => !st.upgrades[pid]?.purchased)) return;
         if (st.dna < up.cost) return;
+        const prevDebt = st.mutationDebt;
         st.dna -= up.cost;
         up.purchased = true;
+        if (st.mode === 'architect' && st.pathogenType === 'virus') {
+          const isStabilizer = id.startsWith('vx_stab');
+          if (isStabilizer) {
+            st.mutationDebt = Math.max(0, st.mutationDebt - 12);
+            if (prevDebt >= 50 && st.mutationDebt < 50) st.events.unshift('Genome instability reduced');
+            else st.events.unshift('Genome stabilized');
+          } else {
+            st.mutationDebt = Math.min(100, st.mutationDebt + 10);
+            if (prevDebt < 50 && st.mutationDebt >= 50) st.events.unshift('Genome instability rising');
+            if (prevDebt < 80 && st.mutationDebt >= 80) st.events.unshift('Mutation debt critical');
+          }
+          while (st.events.length > MAX_EVENTS) st.events.pop();
+        }
       }),
       seedInfection: (target, amount) => set((st) => {
         const bump = amount ?? 20_000; // default boost
@@ -545,6 +946,28 @@ export const useGameStore = create<GameStore>()(
         st.events.unshift(label || 'Seeded exposure');
       }),
       setPolicy: (id, policy) => set((st) => { const c = st.countries[id]; if (c) c.policy = policy; }),
+      deployCordon: (id) => set((st) => {
+        if (st.mode !== 'controller') return;
+        if (st.pathogenType !== 'bioweapon') return;
+        const c = st.countries[id];
+        if (!c) return;
+        let cost = 6;
+        let days = 4;
+        for (const u of Object.values(st.upgrades)) {
+          if (!u.purchased) continue;
+          const e: any = u.effects;
+          if (typeof e.cordonCostDelta === 'number') cost += e.cordonCostDelta;
+          if (typeof e.cordonDaysAdd === 'number') days += e.cordonDaysAdd;
+        }
+        cost = Math.max(1, Math.round(cost));
+        days = Math.max(1, Math.min(10, Math.round(days)));
+        if (st.dna < cost) return;
+        if ((st.cordonDaysLeft[id] || 0) > 0) return;
+        st.dna -= cost;
+        st.cordonDaysLeft[id] = days;
+        st.events.unshift(`Containment cordon deployed in ${c.name} (${days} days)`);
+        while (st.events.length > MAX_EVENTS) st.events.pop();
+      }),
       saveGame: () => {
         const st = get();
         const snapshot = {
@@ -553,8 +976,16 @@ export const useGameStore = create<GameStore>()(
           paused: st.paused,
           speed: st.speed,
           msPerDay: st.msPerDay,
+          pacing: st.pacing,
+          bubbleSpawnMs: st.bubbleSpawnMs,
           dna: st.dna,
           mode: st.mode,
+          pathogenType: st.pathogenType,
+          mutationDebt: st.mutationDebt,
+          antibioticResistance: st.antibioticResistance,
+          fungusBurstDaysLeft: st.fungusBurstDaysLeft,
+          bioweaponVolatility: st.bioweaponVolatility,
+          cordonDaysLeft: st.cordonDaysLeft,
           difficulty: st.difficulty,
           cureProgress: st.cureProgress,
           peakI: st.peakI,
@@ -579,6 +1010,8 @@ export const useGameStore = create<GameStore>()(
             st.paused = snap.paused ?? st.paused;
             st.speed = snap.speed ?? st.speed;
             st.msPerDay = snap.msPerDay ?? st.msPerDay;
+            st.pacing = snap.pacing ?? st.pacing;
+            st.bubbleSpawnMs = snap.bubbleSpawnMs ?? st.bubbleSpawnMs;
             st.dna = snap.dna ?? st.dna;
             st.countries = snap.countries ?? st.countries;
             st.selectedCountryId = snap.selectedCountryId ?? st.selectedCountryId;
@@ -586,6 +1019,12 @@ export const useGameStore = create<GameStore>()(
             st.upgrades = snap.upgrades ?? st.upgrades;
             st.events = Array.isArray(snap.events) ? snap.events : st.events;
             st.mode = snap.mode ?? st.mode;
+            st.pathogenType = snap.pathogenType ?? st.pathogenType;
+            st.mutationDebt = snap.mutationDebt ?? st.mutationDebt;
+            st.antibioticResistance = snap.antibioticResistance ?? st.antibioticResistance;
+            st.fungusBurstDaysLeft = snap.fungusBurstDaysLeft ?? st.fungusBurstDaysLeft;
+            st.bioweaponVolatility = snap.bioweaponVolatility ?? st.bioweaponVolatility;
+            st.cordonDaysLeft = snap.cordonDaysLeft ?? st.cordonDaysLeft;
             st.difficulty = snap.difficulty ?? st.difficulty;
             st.cureProgress = snap.cureProgress ?? st.cureProgress;
             st.peakI = snap.peakI ?? st.peakI;
@@ -600,14 +1039,22 @@ export const useGameStore = create<GameStore>()(
         st.day = 0;
         st.paused = false;
         st.speed = 1;
-        st.msPerDay = 2600;
+        st.msPerDay = 2400;
         st.pacing = 'normal';
-        st.bubbleSpawnMs = 1500;
+        st.bubbleSpawnMs = 2200;
         st.dna = 0;
         st.countries = initialCountries();
         st.selectedCountryId = null;
         st.mode = mode;
+        st.pathogenType = (opts?.pathogenType ?? 'virus') as PathogenType;
+        st.mutationDebt = 0;
+        st.antibioticResistance = 0;
+        st.fungusBurstDaysLeft = 0;
+        st.bioweaponVolatility = 0;
+        st.cordonDaysLeft = {};
+        st.bankedPickups = [];
         st.cureProgress = 0;
+        st.params = paramsForType(st.pathogenType);
         st.difficulty = opts?.difficulty ?? 'normal';
         st.campaignId = opts?.storyId;
         // attach story by id if provided
@@ -619,6 +1066,7 @@ export const useGameStore = create<GameStore>()(
         } else {
           st.story = undefined;
           st.upgrades = upgradesFor(mode, st.campaignId);
+          st.upgrades = { ...st.upgrades, ...typeSpecificUpgrades(mode, st.pathogenType) };
           st.awaitingPatientZero = false;
         }
         // Controller initial policy/ops

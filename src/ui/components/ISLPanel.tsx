@@ -15,7 +15,7 @@ export function ISLPanel() {
     </div>
   );
   return (
-    <div className="panel glass" style={{ position: 'absolute', top: 64, left: 308, padding: 10, maxWidth: 360, pointerEvents: 'auto' }}>
+    <div className="panel glass isl-panel" style={{ position: 'absolute', top: 64, left: 308, padding: 10, maxWidth: 360, pointerEvents: 'auto' }}>
       <div style={{ fontWeight: 700, marginBottom: 6 }}>Pathogen Profile</div>
       <div className="col" style={{ gap: 8 }}>
         <Bar label="Infectivity" value={infectivity} grad="linear-gradient(90deg,#22c55e,#16a34a)" />
@@ -25,4 +25,3 @@ export function ISLPanel() {
     </div>
   );
 }
-

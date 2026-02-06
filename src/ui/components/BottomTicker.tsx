@@ -1,6 +1,6 @@
 import React from 'react';
 import { useGameStore } from '../../state/store';
-import { ShieldCheck, Biohazard, Beaker, Activity, Hospital, AlertTriangle, Trophy, Zap } from 'lucide-react';
+import { ShieldCheck, Biohazard, Beaker, Activity, Hospital, AlertTriangle, Trophy, Zap, Dna, Pill, Sprout, Skull, ShieldAlert, Siren } from 'lucide-react';
 import { useUiStore } from '../../state/ui';
 
 function categorize(e: string): { icon: JSX.Element; label: string } {
@@ -9,10 +9,15 @@ function categorize(e: string): { icon: JSX.Element; label: string } {
   if (t.includes('patient zero')) return { icon: <Biohazard size={14} color="#ef4444" />, label: 'Outbreak' };
   if (t.startsWith('day ')) return { icon: <Activity size={14} color="#22d3ee" />, label: 'Daily' };
   if (t.includes('seeded')) return { icon: <Zap size={14} color="#a78bfa" />, label: 'Spawn' };
+  if (t.includes('mutation') || t.includes('genome') || t.includes('variant') || t.includes('genomic')) return { icon: <Dna size={14} color="#f472b6" />, label: 'Mutation' };
+  if (t.includes('resistance') || t.includes('antibiotic')) return { icon: <Pill size={14} color="#f59e0b" />, label: 'Resistance' };
+  if (t.includes('spore') || t.includes('fungus')) return { icon: <Sprout size={14} color="#34d399" />, label: 'Spore' };
+  if (t.includes('cordon') || t.includes('containment')) return { icon: <ShieldAlert size={14} color="#60a5fa" />, label: 'Cordon' };
+  if (t.includes('bioweapon') || t.includes('volatility') || t.includes('lethality')) return { icon: <Skull size={14} color="#e5e7eb" />, label: 'Bio' };
   if (t.includes('hospital')) return { icon: <Hospital size={14} color="#34d399" />, label: 'Hosp' };
   if (t.includes('policy')) return { icon: <ShieldCheck size={14} color="#10b981" />, label: 'Policy' };
   if (t.includes('cure')) return { icon: <Beaker size={14} color="#60a5fa" />, label: 'Cure' };
-  if (t.includes('warning') || t.includes('alert')) return { icon: <AlertTriangle size={14} color="#f59e0b" />, label: 'Alert' };
+  if (t.includes('warning') || t.includes('alert')) return { icon: <Siren size={14} color="#f59e0b" />, label: 'Alert' };
   return { icon: <Activity size={14} color="#94a3b8" />, label: 'Event' };
 }
 
@@ -20,6 +25,8 @@ export function BottomTicker() {
   const events = useGameStore((s) => s.events);
   const [open, setOpen] = React.useState(false);
   const latest = events[0];
+  const cat = latest ? categorize(latest) : null;
+  const isLong = Boolean(latest && latest.length > 96);
   const setHudHovering = useUiStore((s) => (s as any).setHudHovering as (v: boolean) => void);
   return (
     <div
@@ -33,11 +40,13 @@ export function BottomTicker() {
           {latest ? (
             <>
               <div className="badge" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: '#0b1220', borderColor: '#1f2937' }}>
-                {categorize(latest).icon}
-                <span style={{ fontSize: 11, color: '#9ca3af' }}>{categorize(latest).label}</span>
+                {cat?.icon}
+                <span style={{ fontSize: 11, color: '#9ca3af' }}>{cat?.label}</span>
               </div>
               <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '70vw' }}>
-                <span style={{ animation: 'tickerFade 0.6s ease' }}>{latest}</span>
+                <span style={{ animation: 'tickerFade 0.6s ease' }}>
+                  <span className={isLong ? 'ticker-marquee' : undefined}>{latest}</span>
+                </span>
               </div>
             </>
           ) : (

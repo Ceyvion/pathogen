@@ -17,6 +17,7 @@ import { ToasterProvider } from './system/Toaster';
 import { AmbientVignette } from './components/AmbientVignette';
 import { CommandBar } from './hud/CommandBar';
 import { EventToasts } from './components/EventToasts';
+import { PickupTray } from './components/PickupTray';
 
 export function Hud() {
   const showStats = useUiStore((s) => s.showStats);
@@ -35,6 +36,7 @@ export function Hud() {
       >
         <AmbientVignette />
         <CommandBar />
+        <PickupTray />
         {showStats && <IntelPanel />}
         <RightLabDrawer />
         <BottomTicker />

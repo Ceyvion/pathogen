@@ -10,7 +10,7 @@ export function ObjectivesPanel() {
   if (!story) return null;
   const infected = Object.values(countries).filter(c => c.I > 0).length;
   return (
-    <div className="panel glass" style={{ position: 'absolute', top: 64, left: 308, padding: 10, maxWidth: 360, pointerEvents: 'auto' }}>
+    <div className="panel glass objectives-panel" style={{ position: 'absolute', top: 64, left: 308, padding: 10, maxWidth: 360, pointerEvents: 'auto' }}>
       <div style={{ fontWeight: 700, marginBottom: 6 }}>{story.title}</div>
       <div style={{ display: 'grid', gap: 6 }}>
         {story.objectives.map((o) => {

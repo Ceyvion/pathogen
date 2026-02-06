@@ -1,6 +1,6 @@
 import { ScatterplotLayer } from '@deck.gl/layers';
 
-export type Bubble = { id: number; ll: [number, number]; type: 'dna'|'ops'|'cure'; ttl: number; born: number };
+export type Bubble = { id: number; ll: [number, number]; type: 'dna'|'ops'|'cure'; amount: number; ttl: number; born: number };
 
 const colorOf = (type: 'dna'|'ops'|'cure'): [number, number, number, number] =>
   type === 'cure' ? [96, 165, 250, 220] : type === 'ops' ? [52, 211, 153, 220] : [255, 105, 97, 220];
@@ -27,4 +27,3 @@ export function makeBubblesLayer(opts: {
     updateTriggers: { data: data.length, t }
   });
 }
-

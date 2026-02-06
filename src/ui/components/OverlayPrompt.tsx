@@ -10,7 +10,7 @@ export function OverlayPrompt() {
     ? 'Click a borough to begin the outbreak and set your initial response focus. The clock starts after you choose.'
     : 'Click a borough on the map to begin the outbreak.';
   return (
-    <div style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', pointerEvents: 'none' }}>
+    <div className="overlay-prompt" style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', pointerEvents: 'none' }}>
       <div className="panel glass" style={{ pointerEvents: 'auto', padding: 12 }}>
         <div style={{ fontWeight: 700, marginBottom: 6 }}>{title}</div>
         <div className="muted">{body}</div>

@@ -13,6 +13,7 @@ export function OverlayChips() {
 
   return (
     <div
+      className="overlay-chips"
       style={{ position: 'absolute', left: 12, bottom: 12, pointerEvents: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}
       onMouseEnter={() => useUiStore.getState().setHudHovering(true as any)}
       onMouseLeave={() => useUiStore.getState().setHudHovering(false as any)}

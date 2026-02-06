@@ -4,7 +4,7 @@ import { useGameStore } from '../../state/store';
 import { useUiStore } from '../../state/ui';
 import { Tooltip } from '../system/Tooltip';
 import { Switch } from '../system/Switch';
-import { SeparatorHorizontal, Play, Pause, GaugeCircle, Film, Rocket, RotateCcw, CloudMoon, Palette, Music2, VolumeX, SkipForward, LayoutPanelLeft } from 'lucide-react';
+import { SeparatorHorizontal, Play, Pause, GaugeCircle, Film, Rocket, RotateCcw, CloudMoon, Palette, Music2, VolumeX, SkipForward, LayoutPanelLeft, Zap } from 'lucide-react';
 import * as bgm from '../../audio/bgm';
 
 export function CommandBar() {
@@ -12,7 +12,9 @@ export function CommandBar() {
   const paused = useGameStore((s) => s.paused);
   const day = useGameStore((s) => Math.floor(s.t / s.msPerDay));
   const mode = useGameStore((s) => s.mode);
+  const pathogenType = useGameStore((s) => s.pathogenType);
   const cure = useGameStore((s) => s.cureProgress);
+  const autoCollect = useGameStore((s) => s.autoCollectBubbles);
   const actions = useGameStore((s) => s.actions);
   const pacing = useGameStore((s) => (s as any).pacing as 'slow'|'normal'|'fast');
 
@@ -65,7 +67,7 @@ export function CommandBar() {
     >
       <div className="cmd-left">
         <div className="cmd-title">NYC Outbreak</div>
-        <div className="cmd-sub">Day {day} · {mode === 'architect' ? 'Pathogen Architect' : 'City Response Controller'}</div>
+        <div className="cmd-sub">Day {day} · {mode === 'architect' ? 'Pathogen Architect' : 'City Response Controller'} · {pathogenType[0].toUpperCase() + pathogenType.slice(1)}</div>
       </div>
       <div className="cmd-center">
         <div className="progress-wrap" title="Cure progress">
@@ -109,6 +111,9 @@ export function CommandBar() {
         </Tooltip>
         <Tooltip label="Cinematic Map">
           <div><Switch checked={cinematic} onCheckedChange={setCinematic} label={<span style={{display:'inline-flex',alignItems:'center',gap:6}}><Film size={14}/>Cinematic</span>} /></div>
+        </Tooltip>
+        <Tooltip label={autoCollect ? 'Auto-collect pickups (reduced value)' : 'Auto-collect pickups (reduced value)'}>
+          <div><Switch checked={autoCollect} onCheckedChange={(v) => actions.setAutoCollectBubbles(v)} label={<span style={{display:'inline-flex',alignItems:'center',gap:6}}><Zap size={14}/>Auto</span>} /></div>
         </Tooltip>
         <Tooltip label="Reset Map View">
           <button className="icon-btn" aria-label="Reset map view" onClick={() => (window as any).resetNYCView?.()}><RotateCcw size={16} /></button>

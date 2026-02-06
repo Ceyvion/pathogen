@@ -3,6 +3,13 @@ import { useUiStore } from '../../state/ui';
 import { useGameStore } from '../../state/store';
 import type { Country } from '../../state/types';
 
+const PATHOGENS = [
+  { id: 'virus', name: 'Virus', desc: 'Unstable mutations. Fast gains can backfire.' },
+  { id: 'bacteria', name: 'Bacteria', desc: 'Slower spread, harder to cure. Resistance matters.' },
+  { id: 'fungus', name: 'Fungus', desc: 'Bursts and chokepoints. Weather-driven surges.' },
+  { id: 'bioweapon', name: 'Bioweapon', desc: 'High lethality. Containment tools become essential.' },
+] as const;
+
 const GENES = [
   { id: 'atp_boost', name: 'ATP Boost', desc: '+10 DNA/Ops at start', category: 'dna' },
   { id: 'efficient_bureaucracy', name: 'Efficient Bureaucracy', desc: '+0.5% cure progress at start (Controller)', category: 'ops' },
@@ -25,6 +32,7 @@ export function SetupScreen() {
   const begin = () => {
     if (!pendingMode) return;
     const opts: any = { difficulty: setup.difficulty, genes: setup.genes as any, storyId: pendingStoryId };
+    opts.pathogenType = setup.pathogenType;
     if (pendingMode === 'architect') {
       opts.seedMode = setup.seedMode;
       opts.seedAmount = setup.seedAmount;
@@ -58,6 +66,28 @@ export function SetupScreen() {
               ))}
             </div>
           </div>
+          {!isStory && (
+            <div style={{ flex: '1 1 420px' }}>
+              <div className="muted" style={{ marginBottom: 6 }}>Pathogen Type</div>
+              <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
+                {PATHOGENS.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    className={`chip ${setup.pathogenType === p.id ? 'active' : ''}`}
+                    onClick={() => setSetup({ pathogenType: p.id as any })}
+                    aria-pressed={setup.pathogenType === p.id}
+                    title={p.desc}
+                  >
+                    {p.name}
+                  </button>
+                ))}
+              </div>
+              <div className="muted" style={{ marginTop: 6 }}>
+                {PATHOGENS.find((p) => p.id === setup.pathogenType)?.desc}
+              </div>
+            </div>
+          )}
           <div style={{ flex: '2 1 420px' }}>
             <div className="muted" style={{ marginBottom: 6 }}>Genes</div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))', gap: 10 }}>

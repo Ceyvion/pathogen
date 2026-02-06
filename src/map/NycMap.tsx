@@ -3,6 +3,7 @@ import maplibregl, { Map, NavigationControl, ScaleControl } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { useGameStore } from '../state/store';
 import { useUiStore } from '../state/ui';
+import type { BubbleType } from '../state/types';
 import { MapboxOverlay } from '@deck.gl/mapbox';
 import { PostProcessEffect } from '@deck.gl/core';
 import { ScatterplotLayer, ArcLayer } from '@deck.gl/layers';
@@ -57,7 +58,7 @@ export function NycMap() {
   const boundsRef = useRef<Record<string, [[number, number], [number, number]]>>({});
   // deck.gl overlay state
   const deckRef = useRef<MapboxOverlay | null>(null);
-  const bubblesRef = useRef<Array<{ id: number; ll: [number, number]; type: 'dna'|'ops'|'cure'; ttl: number; born: number }>>([]);
+  const bubblesRef = useRef<Array<{ id: number; ll: [number, number]; type: 'dna'|'ops'|'cure'; amount: number; ttl: number; born: number }>>([]);
   const hoodNodesRef = useRef<any[]>([]);
   const hoodNodesByBoroRef = useRef<Record<string, any[]>>({});
   const animRef = useRef<number>(0);
@@ -71,6 +72,8 @@ export function NycMap() {
   const arcFlowsCacheRef = useRef<Array<{ source: [number,number]; target: [number,number]; daily: number; iPrev: number }>>([]);
   const bridgeFlowsCacheRef = useRef<Array<{ path: [number,number][]; daily: number; iPrev: number }>>([]);
   const effectsRef = useRef<any[]>([]);
+  const uiObstaclesRef = useRef<Array<{ left: number; top: number; right: number; bottom: number }>>([]);
+  const lastUiObstaclesUpdateRef = useRef<number>(0);
 
   function returnNull() {}
 
@@ -632,39 +635,162 @@ export function NycMap() {
       let elapsedSinceSpawn = 0;
       let elapsedSinceBlot = 0;
       let elapsedSinceDust = 0;
+
+      const MAX_ACTIVE_BUBBLES = 10;
+      const SAFE_PAD_PX = 18;
+      const OBSTACLE_PAD_PX = 12;
+      const PICKUP_TTL_MS = 10_000;
+
+      const updateUiObstacles = () => {
+        const root = ref.current;
+        if (!root) return;
+        const now = performance.now();
+        if (now - lastUiObstaclesUpdateRef.current < 250) return;
+        lastUiObstaclesUpdateRef.current = now;
+
+        const containerRect = root.getBoundingClientRect();
+        const selectors = [
+          '.cmd-bar',
+          '.left-panel',
+          '.bottom-ticker',
+          '.overlay-chips',
+          '.sheet-right',
+          '.sheet-overlay',
+          '.isl-panel',
+          '.objectives-panel',
+          '.pickup-tray',
+        ];
+        const rects: Array<{ left: number; top: number; right: number; bottom: number }> = [];
+        try {
+          for (const sel of selectors) {
+            document.querySelectorAll(sel).forEach((el) => {
+              const r = (el as HTMLElement).getBoundingClientRect();
+              const left = r.left - containerRect.left - OBSTACLE_PAD_PX;
+              const top = r.top - containerRect.top - OBSTACLE_PAD_PX;
+              const right = r.right - containerRect.left + OBSTACLE_PAD_PX;
+              const bottom = r.bottom - containerRect.top + OBSTACLE_PAD_PX;
+              // Ignore offscreen rects.
+              if (right < 0 || bottom < 0) return;
+              if (left > containerRect.width || top > containerRect.height) return;
+              rects.push({ left, top, right, bottom });
+            });
+          }
+        } catch {}
+        uiObstaclesRef.current = rects;
+      };
+
+      const pointObstructed = (x: number, y: number, w: number, h: number) => {
+        if (x < SAFE_PAD_PX || y < SAFE_PAD_PX) return true;
+        if (x > w - SAFE_PAD_PX || y > h - SAFE_PAD_PX) return true;
+        for (const r of uiObstaclesRef.current) {
+          if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return true;
+        }
+        return false;
+      };
+
+      const pickSafeBubbleLL = (st: ReturnType<typeof useGameStore.getState>) => {
+        const keys = Object.keys(st.countries);
+        if (!keys.length) return null;
+        const w = ref.current?.clientWidth || 0;
+        const h = ref.current?.clientHeight || 0;
+        if (w <= 0 || h <= 0) return null;
+
+        // Try multiple samples so we almost never spawn under UI.
+        for (let attempt = 0; attempt < 10; attempt++) {
+          const weights = keys.map(k => Math.max(1, st.countries[k].I));
+          const sum = weights.reduce((a,b)=>a+b,0);
+          let r = Math.random() * sum, acc = 0, choice = keys[0];
+          for (let i=0;i<keys.length;i++){ acc += weights[i]; if (r <= acc){ choice = keys[i]; break; } }
+          const boroName = nameMapRef.current[choice] || '';
+          let ll = centroidRef.current[choice] || NYC_CENTER;
+          const hoodList = hoodNodesByBoroRef.current[slug(boroName)] || [];
+          if (hoodList.length) {
+            const pick = hoodList[Math.floor(Math.random() * hoodList.length)];
+            const coords = pick?.geometry?.coordinates;
+            if (Array.isArray(coords) && coords.length >= 2) ll = coords as [number, number];
+          }
+          const pt = map.project(ll as any);
+          if (!pointObstructed(pt.x, pt.y, w, h)) return ll;
+        }
+        return null;
+      };
+
       const loop = () => {
         const now = performance.now();
         const dt = now - last;
         last = now;
         const st = useGameStore.getState();
+        const ui = useUiStore.getState();
+        const actions = useGameStore.getState().actions;
+        updateUiObstacles();
         if (!st.paused) {
           // TTL
           bubblesRef.current = bubblesRef.current.filter(b => { b.ttl -= dt; return b.ttl > 0; });
+          const isUiBlocking = ui.showUpgrades || !ui.mapOverlays?.bubbles;
+
+          // If the UI opens on top of existing pickups, bank them so they never become
+          // "unclickable under menus". Auto-collect also clears the map immediately.
+          if (bubblesRef.current.length) {
+            const w = ref.current?.clientWidth || 0;
+            const h = ref.current?.clientHeight || 0;
+
+            if (st.autoCollectBubbles) {
+              for (const b of bubblesRef.current) {
+                const amt = b.type === 'cure'
+                  ? Math.min(b.amount, 0.45)
+                  : Math.max(1, Math.floor(b.amount * 0.8));
+                actions.collectPickup(b.type as BubbleType, amt);
+              }
+              bubblesRef.current = [];
+            } else if (isUiBlocking) {
+              for (const b of bubblesRef.current) actions.bankPickup(b.type as BubbleType, b.amount);
+              bubblesRef.current = [];
+            } else if (w > 0 && h > 0) {
+              const keep: typeof bubblesRef.current = [];
+              for (const b of bubblesRef.current) {
+                const pt = map.project(b.ll as any);
+                if (pointObstructed(pt.x, pt.y, w, h)) actions.bankPickup(b.type as BubbleType, b.amount);
+                else keep.push(b);
+              }
+              bubblesRef.current = keep;
+            }
+          }
+
           // Spawn cadence
           elapsedSinceSpawn += dt;
           const spawnEvery = st.bubbleSpawnMs || 1400;
+          // Avoid "catch-up spam" after tab switches or jank frames.
+          elapsedSinceSpawn = Math.min(elapsedSinceSpawn, spawnEvery * 2.5);
+          let spawnedThisFrame = 0;
           while (elapsedSinceSpawn >= spawnEvery) {
             elapsedSinceSpawn -= spawnEvery;
+            if (spawnedThisFrame++ >= 2) break;
             // spawn bubble
             const type: 'dna'|'ops'|'cure' = st.mode === 'controller' ? (Math.random() < 0.8 ? 'ops' : 'cure') : (Math.random() < 0.85 ? 'dna' : 'cure');
-            if (!(type === 'cure' && st.cureProgress < 5)) {
-              const keys = Object.keys(st.countries);
-              if (keys.length) {
-                const weights = keys.map(k => Math.max(1, st.countries[k].I));
-                const sum = weights.reduce((a,b)=>a+b,0);
-                let r = Math.random() * sum, acc = 0, choice = keys[0];
-                for (let i=0;i<keys.length;i++){ acc += weights[i]; if (r <= acc){ choice = keys[i]; break; } }
-                const boroName = nameMapRef.current[choice] || '';
-                let ll = centroidRef.current[choice] || NYC_CENTER;
-                const hoodList = hoodNodesByBoroRef.current[slug(boroName)] || [];
-                if (hoodList.length) {
-                  const pick = hoodList[Math.floor(Math.random() * hoodList.length)];
-                  const coords = pick?.geometry?.coordinates;
-                  if (Array.isArray(coords) && coords.length >= 2) ll = coords as [number, number];
-                }
-                bubblesRef.current.push({ id: idCounterRef.current++, ll, type, ttl: 8000, born: now });
-              }
+            if (type === 'cure' && st.mode === 'architect' && st.cureProgress < 5) continue;
+
+            // Amount is stored per pickup so banked + map pickups behave consistently.
+            const baseAmount = type === 'cure' ? 0.6 : (Math.random() < 0.5 ? 2 : 3);
+            if (st.autoCollectBubbles) {
+              // Accessibility: auto-collect with a small penalty.
+              const amt = type === 'cure' ? 0.45 : Math.max(1, Math.floor(baseAmount * 0.8));
+              actions.collectPickup(type as BubbleType, amt);
+              continue;
             }
+
+            if (isUiBlocking) {
+              actions.bankPickup(type as BubbleType, baseAmount);
+              continue;
+            }
+
+            if (bubblesRef.current.length >= MAX_ACTIVE_BUBBLES) continue;
+
+            const ll = pickSafeBubbleLL(st);
+            if (!ll) {
+              actions.bankPickup(type as BubbleType, baseAmount);
+              continue;
+            }
+            bubblesRef.current.push({ id: idCounterRef.current++, ll, type, amount: baseAmount, ttl: PICKUP_TTL_MS, born: now });
           }
         }
 
@@ -830,8 +956,7 @@ export function NycMap() {
             bubblesRef.current = bubblesRef.current.filter(b => b.id !== d.id);
             try { playBubble(d.type); } catch {}
             const gs = useGameStore.getState();
-            if (d.type === 'cure') gs.actions.adjustCure(-0.6);
-            else gs.actions.addDNA(Math.random() < 0.5 ? 2 : 3);
+            gs.actions.collectPickup(d.type as BubbleType, d.amount);
           }
         });
         const hospitalLayer = makeHospitalsLayer({
@@ -902,7 +1027,6 @@ export function NycMap() {
         });
 
         // Throttle heavy computations and deck updates
-        const ui = useUiStore.getState();
         const layers: any[] = [];
         // infection visuals (additive) first
         if (dustLayer) layers.push(dustLayer);

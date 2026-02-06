@@ -1,5 +1,18 @@
 # TODO
 
+## Task: Research Spawn + Ticker Best Practices (Web)
+
+## Plan
+
+- [ ] Identify primary sources for UI-safe pickup spawning and occlusion/safe-zone handling.
+- [ ] Identify primary sources for game event/news ticker systems (templates, shuffle bag, cooldowns).
+- [ ] Collect recommended simple algorithms (Poisson disk sampling, shuffle bag, weighted random with cooldown).
+- [ ] Synthesize actionable bullet points with citations/links.
+
+## Verification
+
+- [ ] Confirm each recommendation is backed by at least one primary source.
+
 ## Problem Statement
 
 When starting a new game, the simulation advances immediately and can generate infections without the player placing Patient Zero or selecting a starting focus. This feels like the game "picks a random spot and goes" and it ramps too quickly before the player has any agency.
@@ -34,21 +47,28 @@ When starting a new game, the simulation advances immediately and can generate i
 - [ ] Manual: Start Architect (random/widespread); confirm outbreak is seeded as configured and starts immediately after seeding.
 - [ ] Manual: Start Controller; confirm intended behavior is consistent (player chooses outbreak start; no surprise outbreak before any explicit start condition).
 - [x] Automated: run unit tests (Vitest) confirming no sim advance during awaiting.
+- [x] Automated: `pnpm exec tsc --noEmit` passes.
+- [x] Automated: `pnpm build` passes.
 
 ## Next: UX + Variety
 
-- [ ] Bubble pickup system (fix UI overlap + pacing):
-  - [ ] Placement rules: never spawn bubbles under UI chrome/menus; enforce a “safe map click zone”.
-  - [ ] Grace buffer: if a bubble would spawn under UI, auto-bank it into a tray for 3–5s.
-  - [ ] Accessibility toggle: optional auto-collect bubbles (balance via small penalty if desired).
-  - [ ] Spawn pacing: reduce spam, cap active bubbles, and/or drive spawn rate via a pacing/intensity model.
-- [ ] World event ticker overhaul:
-  - [ ] Add a state-reactive event system (templates + tags + cooldowns) that can output 100+ prewritten events.
-  - [ ] Include NYC-specific locations and institutions; keep tone mostly straight with occasional dark humor.
-  - [ ] Prevent “filler”: events must reference current mode, day, policies, hospitals, cure progress, deaths.
-- [ ] Plague type variety (force different minds, not skins):
-  - [ ] Add pathogen “type modules” that change mechanics (virus/bacteria/fungus/bioweapon).
-  - [ ] Ensure each type changes the optimal play loop (avoid one solved strategy).
+- [x] Bubble pickup system (fix UI overlap + pacing):
+  - [x] Placement rules: never spawn bubbles under UI chrome/menus; enforce a “safe map click zone”.
+  - [x] Grace buffer: if a bubble would spawn under UI (or becomes obstructed after UI opens), auto-bank it into a tray for ~5s.
+  - [x] Accessibility toggle: optional auto-collect bubbles (reduced value).
+  - [x] Spawn pacing: cap active bubbles, cap catch-up spawns, and tie spawn interval to pacing.
+- [x] World event ticker overhaul:
+  - [x] Add a state-reactive event system (templates + shuffle-bag) that can output 100+ authored-feeling events.
+  - [x] Include NYC-specific locations and near-real fake celebrity names; tone mostly straight with occasional dark humor.
+  - [x] Reduce filler: lines are parameterized by borough/policy/hosp load/cure progress and trigger on subsystem thresholds.
+- [x] Plague type variety (force different minds, not skins):
+  - [x] Add pathogen “type modules” that change mechanics (virus/bacteria/fungus/bioweapon).
+  - [x] Add type-specific levers (upgrades + containment tools) and surface subsystems in HUD so play patterns differ.
+  - [x] Research design/mechanics patterns that differentiate pathogen types beyond numbers (Plague Inc-like), focusing on actionable levers and anti-solved-strategy techniques.
+    - [x] Collect sources for distinct pathogen mechanics (fungus, virus, bacteria, bio-weapon).
+    - [x] Extract actionable mechanics levers and anti-dominant-strategy patterns.
+    - [x] Synthesize concise recommendations with source links.
+    - [x] Record findings in Review section.
 
 ## Review (Implementation Notes)
 
@@ -58,3 +78,17 @@ When starting a new game, the simulation advances immediately and can generate i
 - Architect `seedMode` is now honored (`pick`, `random`, `widespread`). `seedTarget` is supported to make random seeding testable/deterministic.
 - Controller no longer relies on background importations to "randomly" start the outbreak. The player selects the outbreak origin and focus; the clock starts after the click.
 - Fixed TypeScript correctness for `pacing`/`bubbleSpawnMs` state and deck.gl blending parameter keys (`blendFunc` instead of missing `GL.BLEND_FUNC`).
+- Bubble pickup UX:
+  - Safe-zone spawn sampling avoids HUD chrome; when UI opens or bubbles are toggled off, on-map bubbles are auto-banked into a short-lived tray so they are never stuck behind menus.
+  - Added an accessibility auto-collect toggle (reduced value) and tuned spawn pacing (caps + anti-catch-up spam).
+- World event ticker:
+  - Added a reactive template system with shuffle-bag anti-repeat and severity tiers; includes NYC-specific locations + near-real fake celebrity names.
+  - Added ticker categorization (mutation/resistance/spore/cordon/bioweapon) and marquee scrolling for long headlines.
+- Plague types:
+  - Added explicit subsystem mechanics (virus mutation debt + random drift, bacteria antibiotic resistance, fungus spore bursts, bioweapon volatility).
+  - Added type-specific upgrade levers and exposed controller-only bioweapon cordon deployment in the Intel panel.
+
+### Research Review (2026-02-06)
+
+- Confirmed Plague Inc. differentiates types via unique mechanics: fungus uses spore-burst/eruption/hardening to actively reseed countries, bacteria gets resilience that boosts survivability across environments, virus increases random mutation and devolution pressure, and bio-weapon has passive lethality growth with abilities to reset or slow it.
+- Evidence supports levers around detectability vs transmission and asymptomatic spread as a meaningful gameplay axis.

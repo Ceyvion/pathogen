@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-import type { GameMode, GeneId, Country } from './types';
+import type { GameMode, GeneId, Country, PathogenType } from './types';
 
 type UiState = {
   scene: 'boot' | 'title' | 'setup' | 'game';
@@ -36,6 +36,7 @@ type UiState = {
     seedAmount: number; // initial infections for Architect starts
     initialPolicy: Country['policy']; // Controller starts
     startingOps: number; // initial ops points for Controller
+    pathogenType: PathogenType;
   };
   setSetup: (s: Partial<{
     difficulty: 'casual'|'normal'|'brutal';
@@ -44,6 +45,7 @@ type UiState = {
     seedAmount: number;
     initialPolicy: Country['policy'];
     startingOps: number;
+    pathogenType: PathogenType;
   }>) => void;
 };
 
@@ -77,7 +79,7 @@ export const useUiStore = create<UiState>((set) => ({
   setPendingStory: (id) => set(() => ({ pendingStoryId: id })),
   toSetup: (m, storyId) => set(() => ({ scene: 'setup', pendingMode: m, pendingStoryId: storyId })),
   setCinematic: (v) => set(() => { try { localStorage.setItem('cinematicV1', v ? '1' : '0'); } catch {}; return { cinematic: v } as any; }),
-  setup: { difficulty: 'normal', genes: [], seedMode: 'pick', seedAmount: 15000, initialPolicy: 'advisory', startingOps: 8 },
+  setup: { difficulty: 'normal', genes: [], seedMode: 'pick', seedAmount: 15000, initialPolicy: 'advisory', startingOps: 8, pathogenType: 'virus' },
   setSetup: (p) => set((s) => ({ setup: { ...s.setup, ...p, genes: p.genes ?? s.setup.genes } })),
   setHudHovering: (v) => set(() => ({ hudHovering: v } as any)),
   setHudCompact: (v) => set(() => ({ hudCompact: v } as any)),

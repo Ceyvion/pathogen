@@ -22,6 +22,14 @@ export function IntelPanel() {
   const selId = useGameStore((s) => s.selectedCountryId);
   const countries = useGameStore((s) => s.countries);
   const mode = useGameStore((s) => s.mode);
+  const pathogenType = useGameStore((s) => s.pathogenType);
+  const mutationDebt = useGameStore((s) => s.mutationDebt);
+  const antibioticResistance = useGameStore((s) => s.antibioticResistance);
+  const fungusBurstDaysLeft = useGameStore((s) => s.fungusBurstDaysLeft);
+  const bioweaponVolatility = useGameStore((s) => s.bioweaponVolatility);
+  const cordonDaysLeft = useGameStore((s) => s.cordonDaysLeft);
+  const dna = useGameStore((s) => s.dna);
+  const upgrades = useGameStore((s) => s.upgrades);
   const hudCompact = useUiStore((s) => (s as any).hudCompact as boolean);
   const [expanded, setExpanded] = React.useState(!hudCompact);
   React.useEffect(() => { setExpanded(!hudCompact); }, [hudCompact]);
@@ -34,6 +42,44 @@ export function IntelPanel() {
   );
   const sel = selId ? countries[selId] : null;
   const setPolicy = useGameStore((s) => s.actions.setPolicy);
+  const deployCordon = useGameStore((s) => s.actions.deployCordon);
+
+  const pathogenLabel = pathogenType[0].toUpperCase() + pathogenType.slice(1);
+  const subsystem = React.useMemo(() => {
+    if (pathogenType === 'virus') {
+      const v = Math.max(0, Math.min(100, mutationDebt));
+      const color = v >= 80 ? '#f87171' : v >= 50 ? '#fbbf24' : '#34d399';
+      return { label: 'Mutation debt', valueLabel: `${v.toFixed(0)}/100`, frac: v / 100, color };
+    }
+    if (pathogenType === 'bacteria') {
+      const v = Math.max(0, Math.min(1, antibioticResistance)) * 100;
+      const color = v >= 70 ? '#f87171' : v >= 40 ? '#fbbf24' : '#34d399';
+      return { label: 'Antibiotic resistance', valueLabel: `${v.toFixed(0)}%`, frac: v / 100, color };
+    }
+    if (pathogenType === 'fungus') {
+      const v = Math.max(0, Math.min(6, Math.floor(fungusBurstDaysLeft)));
+      const on = v > 0;
+      return { label: 'Spore burst', valueLabel: on ? `${v}d left` : 'dormant', frac: on ? v / 6 : 0, color: on ? '#34d399' : '#64748b' };
+    }
+    // bioweapon
+    const v = Math.max(0, Math.min(1, bioweaponVolatility)) * 100;
+    const color = v >= 70 ? '#f87171' : v >= 40 ? '#fbbf24' : '#e5e7eb';
+    return { label: 'Volatility', valueLabel: `${v.toFixed(0)}%`, frac: v / 100, color };
+  }, [pathogenType, mutationDebt, antibioticResistance, fungusBurstDaysLeft, bioweaponVolatility]);
+
+  const cordonCfg = React.useMemo(() => {
+    let cost = 6;
+    let days = 4;
+    for (const u of Object.values(upgrades)) {
+      if (!u.purchased) continue;
+      const e: any = u.effects;
+      if (typeof e.cordonCostDelta === 'number') cost += e.cordonCostDelta;
+      if (typeof e.cordonDaysAdd === 'number') days += e.cordonDaysAdd;
+    }
+    cost = Math.max(1, Math.round(cost));
+    days = Math.max(1, Math.min(10, Math.round(days)));
+    return { cost, days };
+  }, [upgrades]);
 
   const iRate = totals.I / Math.max(1, totals.N);
   const hRate = totals.H / Math.max(1, totals.N);
@@ -42,7 +88,7 @@ export function IntelPanel() {
     <div className="col">
       <div className="row" style={{ justifyContent: 'space-between' }}>
         <strong>Intel</strong>
-        <span className="muted">{mode === 'architect' ? 'Pathogen' : 'Controller'}</span>
+        <span className="muted">{pathogenLabel} · {mode === 'architect' ? 'Architect' : 'Controller'}</span>
       </div>
       <div className="row" style={{ gap: 12 }}>
         <div style={{ textAlign: 'center' }}>
@@ -61,6 +107,15 @@ export function IntelPanel() {
         <div>R</div><div style={{ textAlign: 'right' }}>{totals.R.toFixed(0)}</div>
         <div>D</div><div style={{ textAlign: 'right' }}>{totals.D.toFixed(0)}</div>
       </div>
+      <div style={{ marginTop: 6 }}>
+        <div className="row" style={{ justifyContent: 'space-between' }}>
+          <span className="muted">{subsystem.label}</span>
+          <span style={{ fontSize: 12, color: subsystem.color }}>{subsystem.valueLabel}</span>
+        </div>
+        <div className="progress-track" style={{ height: 6, marginTop: 4 }}>
+          <div className="progress-fill" style={{ width: `${Math.floor(subsystem.frac * 100)}%`, background: subsystem.color, boxShadow: 'none' }} />
+        </div>
+      </div>
       <hr style={{ borderColor: 'var(--border)', width: '100%' }} />
       <strong>Selected</strong>
       {sel ? (
@@ -74,24 +129,52 @@ export function IntelPanel() {
           </div>
           <div className="row" style={{ justifyContent: 'space-between' }}>
             <label htmlFor="policy2">Policy</label>
-            <select
-              id="policy2"
-              value={sel.policy}
-              onChange={(e) => setPolicy(sel.id, e.target.value as any)}
-              style={{ background: 'transparent', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 8, padding: '4px 8px' }}
-            >
-              <option value="open">Open</option>
-              <option value="advisory">Advisory</option>
-              <option value="restrictions">Restrictions</option>
-              <option value="lockdown">Lockdown</option>
-            </select>
+            {mode === 'controller' ? (
+              <select
+                id="policy2"
+                value={sel.policy}
+                onChange={(e) => setPolicy(sel.id, e.target.value as any)}
+                style={{ background: 'transparent', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 8, padding: '4px 8px' }}
+              >
+                <option value="open">Open</option>
+                <option value="advisory">Advisory</option>
+                <option value="restrictions">Restrictions</option>
+                <option value="lockdown">Lockdown</option>
+              </select>
+            ) : (
+              <span className="badge">{sel.policy}</span>
+            )}
           </div>
+          {mode === 'controller' && pathogenType === 'bioweapon' && (
+            <div className="col" style={{ gap: 6 }}>
+              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                <span>Containment cordon</span>
+                {(cordonDaysLeft[sel.id] || 0) > 0 ? (
+                  <span className="badge">Active: {cordonDaysLeft[sel.id]}d</span>
+                ) : (
+                  <button
+                    className="btn"
+                    disabled={dna < cordonCfg.cost}
+                    onClick={() => deployCordon(sel.id)}
+                    title="Cuts mobility to/from this borough for a few days"
+                  >
+                    Deploy ({cordonCfg.cost} Ops)
+                  </button>
+                )}
+              </div>
+              <div className="muted" style={{ fontSize: 12 }}>
+                Tip: Cordons cut travel to/from this borough for ~{cordonCfg.days} days. Use them to keep volatility spikes local.
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <span className="muted">None</span>
       )}
       <div className="muted" style={{ fontSize: 12 }}>
-        Tip: Click a borough to focus, then adjust policy as needed.
+        {mode === 'controller'
+          ? 'Tip: Click a borough to focus, then adjust policy as needed.'
+          : 'Tip: In Architect mode, the city shifts policy automatically as cases rise.'}
       </div>
     </div>
   );

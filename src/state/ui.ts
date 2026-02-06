@@ -3,11 +3,15 @@ import { create } from 'zustand';
 import type { GameMode, GeneId, Country } from './types';
 
 type UiState = {
-  scene: 'title' | 'setup' | 'game';
+  scene: 'boot' | 'title' | 'setup' | 'game';
   showStats: boolean;
   showUpgrades: boolean;
   mapOverlays: { hospitals: boolean; flows: boolean; bubbles: boolean; policy: boolean };
   routeWeights: Record<string, number>; // bridge route weight overrides
+  cinematic: boolean;
+  hudHovering: boolean;
+  hudCompact: boolean;
+  preset: 'default'|'neo'|'emergency';
   toggleStats: () => void;
   toggleUpgrades: () => void;
   toggleOverlay: (k: keyof UiState['mapOverlays']) => void;
@@ -20,6 +24,10 @@ type UiState = {
   pendingStoryId?: string;
   setPendingStory: (id: string | undefined) => void;
   toSetup: (m: GameMode, storyId?: string) => void;
+  setCinematic: (v: boolean) => void;
+  setHudHovering: (v: boolean) => void;
+  setHudCompact: (v: boolean) => void;
+  setPreset: (p: 'default'|'neo'|'emergency') => void;
   setup: {
     difficulty: 'casual'|'normal'|'brutal';
     genes: GeneId[];
@@ -39,10 +47,17 @@ type UiState = {
   }>) => void;
 };
 
+const initialCinematic = (() => { try { return localStorage.getItem('cinematicV1') !== '0'; } catch { return true; } })();
+const initialPreset = (() => { try { return (localStorage.getItem('presetV1') as any) || 'default'; } catch { return 'default'; } })();
+
 export const useUiStore = create<UiState>((set) => ({
-  scene: 'title',
+  scene: 'boot',
   showStats: true,
   showUpgrades: false,
+  cinematic: initialCinematic,
+  hudHovering: false,
+  hudCompact: false,
+  preset: initialPreset,
   mapOverlays: { hospitals: true, flows: true, bubbles: true, policy: false },
   routeWeights: {},
   toggleStats: () => set((s) => ({ showStats: !s.showStats })),
@@ -61,6 +76,10 @@ export const useUiStore = create<UiState>((set) => ({
   pendingStoryId: undefined,
   setPendingStory: (id) => set(() => ({ pendingStoryId: id })),
   toSetup: (m, storyId) => set(() => ({ scene: 'setup', pendingMode: m, pendingStoryId: storyId })),
+  setCinematic: (v) => set(() => { try { localStorage.setItem('cinematicV1', v ? '1' : '0'); } catch {}; return { cinematic: v } as any; }),
   setup: { difficulty: 'normal', genes: [], seedMode: 'pick', seedAmount: 15000, initialPolicy: 'advisory', startingOps: 8 },
   setSetup: (p) => set((s) => ({ setup: { ...s.setup, ...p, genes: p.genes ?? s.setup.genes } })),
+  setHudHovering: (v) => set(() => ({ hudHovering: v } as any)),
+  setHudCompact: (v) => set(() => ({ hudCompact: v } as any)),
+  setPreset: (p) => set(() => { try { localStorage.setItem('presetV1', p); } catch {}; return { preset: p } as any; }),
 }));

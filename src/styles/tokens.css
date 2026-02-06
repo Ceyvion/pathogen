@@ -1,19 +1,19 @@
 :root {
-  --bg: #0b0f14;
-  --surface: #121821;
-  --text: #e6eef6;
+  --bg: #1E1E1E;           /* Charred death */
+  --surface: #232A33;      /* UI slate */
+  --text: #EAECEF;         /* Accent white */
   --muted: #94a3b8;
-  --border: #263041;
+  --border: #232A33;       /* UI slate */
 
   --s: #2b6cb0;
   --e: #d69e2e;
-  --i: #c53030;
+  --i: #C62828;            /* Danger red */
   --r: #4a5568;
-  --d: #111827;
+  --d: #1E1E1E;            /* Charred */
 
-  --ok: #10b981;
-  --warn: #f59e0b;
-  --err: #ef4444;
+  --ok: #F2C94C;           /* Opponent yellow */
+  --warn: #F2C94C;
+  --err: #C62828;
 
   --radius: 12px;
   --space-1: 4px;
@@ -40,3 +40,16 @@
   --border: #ffffff;
 }
 
+[data-preset="neo"] {
+  --bg: #090b12;
+  --surface: #0d1320;
+  --ok: #22d3ee;
+  --i: #ef2d56;
+}
+
+[data-preset="emergency"] {
+  --bg: #120b0b;
+  --surface: #1a1010;
+  --ok: #f59e0b;
+  --i: #dc2626;
+}

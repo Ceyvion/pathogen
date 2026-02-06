@@ -7,6 +7,7 @@ import { STORIES } from '../story/stories';
 type Actions = {
   setSpeed: (s: 1 | 3 | 10) => void;
   togglePause: () => void;
+  setPaused: (v: boolean) => void;
   setPacing: (p: 'slow'|'normal'|'fast') => void;
   selectCountry: (id: CountryID | null) => void;
   tick: (dtMs: number) => void;
@@ -15,6 +16,7 @@ type Actions = {
   loadGame: () => void;
   addEvent: (text: string) => void;
   seedInfection: (target?: CountryID | 'all', amount?: number) => void;
+  seedExposure: (target?: CountryID | 'all', amount?: number) => void;
   setPolicy: (id: CountryID, policy: Country['policy']) => void;
   startNewGame: (mode: GameMode, opts?: {
     difficulty?: 'casual'|'normal'|'brutal';
@@ -37,6 +39,39 @@ export type GameStore = WorldState & { actions: Actions };
 // Persistent accumulator for fixed-step integration. Without this, 1× (~16ms frames)
 // rarely reaches the 50ms step threshold, making time appear stuck until 3×/10×.
 let __simAccMs = 0;
+
+const BORO_IDS = ['manhattan', 'brooklyn', 'queens', 'bronx', 'staten_island'] as const satisfies readonly CountryID[];
+
+function clampSeedAmount(n: unknown, fallback: number) {
+  const v = typeof n === 'number' && Number.isFinite(n) ? n : fallback;
+  return Math.max(300, Math.min(60_000, Math.floor(v)));
+}
+
+function seedExposureInPlace(
+  st: { countries: Record<CountryID, Country>; events: string[] },
+  target: CountryID | 'all',
+  amount: number
+) {
+  const apply = (c: Country, bump: number) => {
+    const space = Math.max(0, c.S - 1);
+    const delta = Math.min(space, bump);
+    c.S -= delta;
+    c.E += delta;
+  };
+
+  if (target === 'all') {
+    const ids = Object.keys(st.countries) as CountryID[];
+    const per = Math.max(1, Math.floor(amount / Math.max(1, ids.length)));
+    for (const id of ids) apply(st.countries[id], per);
+    st.events.unshift('Widespread exposure seeded');
+    return;
+  }
+
+  const c = st.countries[target];
+  if (!c) return;
+  apply(c, amount);
+  st.events.unshift(`Exposure seeded in ${c.name}`);
+}
 
 const initialCountries = (): Record<CountryID, Country> => {
   const mk = (id: string, name: string, pop: number): Country => ({
@@ -206,7 +241,7 @@ export const useGameStore = create<GameStore>()(
     day: 0,
     paused: false,
     speed: 1,
-    msPerDay: 1200, // default pacing: ~1.2s per in-game day at 1x
+    msPerDay: 2600, // slower default pacing: ~2.6s per in-game day at 1x
     pacing: 'normal' as 'slow'|'normal'|'fast',
     bubbleSpawnMs: 1400,
     dna: 0,
@@ -219,26 +254,26 @@ export const useGameStore = create<GameStore>()(
     peakI: 0,
     // Advanced SEIR params
     params: {
-      beta: 0.45,
-      sigma: 1 / 5,
-      gammaRec: 1 / 8,
-      muBase: 0.0005,
+      beta: 0.22,
+      sigma: 1 / 5.5,
+      gammaRec: 1 / 9,
+      muBase: 0.00035,
       seasonalityAmp: 0.15,
       seasonalityPhase: 15,
       hospRate: 0.03,
       dischargeRate: 0.12,
-      hospCapacityPerK: 4.5,
+      hospCapacityPerK: 4.0,
       mobilityScale: 1,
-      importationPerDay: 5,
+      importationPerDay: 1,
       variantTransMult: 1,
       symFrac: 0.65,
       symContactMul: 0.7,
       severityMobilityFactor: 0.5,
       // early-game pacing: short grace and gradual ramp
-      startRampDelayDays: 2,
-      startRampDurationDays: 10,
-      earlyPointBoostDays: 8,
-      earlyPointBoostMul: 1.5,
+      startRampDelayDays: 6,
+      startRampDurationDays: 35,
+      earlyPointBoostDays: 10,
+      earlyPointBoostMul: 1.4,
     },
     upgrades: baseUpgradesArchitect(),
     events: [],
@@ -246,24 +281,38 @@ export const useGameStore = create<GameStore>()(
     actions: {
       setSpeed: (s) => set((st) => { st.speed = s; }),
       togglePause: () => set((st) => {
+        // Do not allow unpausing while we're still waiting for the player to
+        // choose a starting location/focus. This is the real "game start" gate.
+        if (st.paused && st.awaitingPatientZero) return;
         st.paused = !st.paused;
         if (st.paused) __simAccMs = 0; // clear leftover fractional time when pausing
       }),
+      setPaused: (v) => set((st) => {
+        if (!v && st.awaitingPatientZero) return;
+        st.paused = v;
+        if (st.paused) __simAccMs = 0;
+      }),
       setPacing: (p) => set((st) => {
         st.pacing = p;
-        if (p === 'slow') { st.msPerDay = 1800; st.bubbleSpawnMs = 1600; }
-        else if (p === 'fast') { st.msPerDay = 800; st.bubbleSpawnMs = 1200; }
-        else { st.msPerDay = 1200; st.bubbleSpawnMs = 1400; }
+        if (p === 'slow') { st.msPerDay = 3000; st.bubbleSpawnMs = 1900; }
+        else if (p === 'fast') { st.msPerDay = 1200; st.bubbleSpawnMs = 1300; }
+        else { st.msPerDay = 2200; st.bubbleSpawnMs = 1600; }
       }),
       selectCountry: (id) => set((st) => { st.selectedCountryId = id; }),
       addEvent: (text) => set((st) => { st.events.unshift(text); if (st.events.length > MAX_EVENTS) st.events.pop(); }),
       tick: (dtMs) => {
         const st = get();
-        if (st.paused) return;
+        if (st.paused || st.awaitingPatientZero) {
+          __simAccMs = 0;
+          return;
+        }
         // fixed-step integration ~50ms
         const stepMs = 50;
-        __simAccMs += dtMs * st.speed;
-        while (__simAccMs >= stepMs) {
+        const dtClamped = Math.max(0, Math.min(dtMs, 200)); // avoid huge catch-up jumps
+        __simAccMs += dtClamped * st.speed;
+        let steps = 0;
+        const maxStepsPerTick = 20; // 1s of sim max per frame at 50ms steps
+        while (__simAccMs >= stepMs && steps < maxStepsPerTick) {
           set((state) => {
             state.t += stepMs;
             const dtDays = stepMs / state.msPerDay;
@@ -338,7 +387,8 @@ export const useGameStore = create<GameStore>()(
 
               // Hospital flows
               const symptomaticI = symFracEff * c.I;
-              const newHosp = prog * (p.hospRate * hospRateMulUp) * symptomaticI * dtDays;
+              // Admissions should reflect current symptomatic burden; do not gate by early-game ramp
+              const newHosp = (p.hospRate * hospRateMulUp) * symptomaticI * dtDays;
               const discharges = Math.min(c.H, (p.dischargeRate * dischargeMulUp) * c.H * dtDays);
               c.H += newHosp - discharges;
               c.R += discharges;
@@ -423,7 +473,8 @@ export const useGameStore = create<GameStore>()(
             const nowDay = Math.floor(state.t / state.msPerDay);
             if (nowDay !== prevDay) {
               const I = Object.values(state.countries).reduce((s, c) => s + c.I, 0);
-              state.events.unshift(`Day ${nowDay}: I=${I.toFixed(0)} | Cure ${state.cureProgress.toFixed(1)}%`);
+            const per100k = (I / Math.max(1, totalPop)) * 100_000;
+            state.events.unshift(`Day ${nowDay}: I=${I.toFixed(0)} (${per100k.toFixed(1)}/100k) | Cure ${state.cureProgress.toFixed(1)}%`);
               try { playMilestone('day'); } catch {}
               if (state.events.length > MAX_EVENTS) state.events.pop();
               // evaluate story objectives (simple completion only)
@@ -447,6 +498,11 @@ export const useGameStore = create<GameStore>()(
             }
           });
           __simAccMs -= stepMs;
+          steps++;
+        }
+        if (steps >= maxStepsPerTick) {
+          // Drop the remainder to avoid spiral-of-death when the tab was inactive.
+          __simAccMs = 0;
         }
       },
       purchaseUpgrade: (id) => set((st) => {
@@ -471,6 +527,22 @@ export const useGameStore = create<GameStore>()(
           apply(st.countries[target]);
         }
         st.events.unshift('Seeded infections for demo');
+      }),
+      // Seed into Exposed for gentler onset (used by Patient Zero + architect starts)
+      seedExposure: (target?: CountryID | 'all', amount?: number) => set((st) => {
+        const bump = amount ?? 10_000;
+        const apply = (c: Country) => {
+          const space = Math.max(0, c.S - 1);
+          const delta = Math.min(space, bump);
+          c.S -= delta;
+          c.E += delta;
+        };
+        if (!target || target === 'all') {
+          Object.values(st.countries).forEach(apply);
+        } else if (st.countries[target]) {
+          apply(st.countries[target]);
+        }
+        st.events.unshift('Seeded exposure');
       }),
       setPolicy: (id, policy) => set((st) => { const c = st.countries[id]; if (c) c.policy = policy; }),
       saveGame: () => {
@@ -528,9 +600,9 @@ export const useGameStore = create<GameStore>()(
         st.day = 0;
         st.paused = false;
         st.speed = 1;
-        st.msPerDay = 1200;
+        st.msPerDay = 2600;
         st.pacing = 'normal';
-        st.bubbleSpawnMs = 1400;
+        st.bubbleSpawnMs = 1500;
         st.dna = 0;
         st.countries = initialCountries();
         st.selectedCountryId = null;
@@ -567,29 +639,46 @@ export const useGameStore = create<GameStore>()(
         st.peakI = 0;
         st.events = ['New game started'];
         st.travel = travelEdges();
-        // Architect seeding options
+
+        // Start gating: do not advance sim until the start condition is satisfied.
+        // Architect: Patient Zero placement (or explicit auto-seed mode).
+        // Controller: choose initial focus (we also seed an initial outbreak deterministically).
+
         if (mode === 'architect') {
-          const seedMode = opts?.seedMode || (opts?.storyId === 'architect_patient_zero' ? 'pick' : 'random');
-          const amount = Math.max(500, Math.min(200_000, opts?.seedAmount ?? 15_000));
+          const isStoryPick = Boolean(opts?.storyId && opts.storyId === 'architect_patient_zero');
+          const seedMode = isStoryPick ? 'pick' : (opts?.seedMode ?? 'pick');
+          const amount = clampSeedAmount(opts?.seedAmount, 6_000);
+
           if (seedMode === 'pick') {
             st.awaitingPatientZero = true;
+            st.paused = true;
             (st as any).patientZeroSeedAmount = amount;
             st.events.unshift('Select a borough to place Patient Zero');
           } else if (seedMode === 'random') {
-            const ids = Object.keys(st.countries) as CountryID[];
-            const choice = ids[Math.floor(Math.random() * ids.length)];
-            const c = st.countries[choice];
-            const bump = Math.min(Math.max(1, c.S - 1), amount);
-            c.S -= bump; c.I += bump;
-            st.selectedCountryId = choice;
-            st.events.unshift(`Patient Zero emerged in ${c.name}`);
+            const target = opts?.seedTarget
+              ?? (BORO_IDS[Math.floor(Math.random() * BORO_IDS.length)] as CountryID);
+            seedExposureInPlace(st as any, target, amount);
+            st.selectedCountryId = target;
+            st.awaitingPatientZero = false;
+            st.paused = false;
+            st.events.unshift(`Patient Zero established in ${st.countries[target]?.name || target}`);
           } else if (seedMode === 'widespread') {
-            for (const c of Object.values(st.countries)) {
-              const bump = Math.min(Math.max(1, c.S - 1), Math.floor(amount * (c.pop / 1_000_000)));
-              c.S -= bump; c.I += bump;
-            }
-            st.events.unshift('Multiple introduction events seeded across NYC');
+            seedExposureInPlace(st as any, 'all', amount);
+            st.awaitingPatientZero = false;
+            st.paused = false;
+            st.events.unshift('Widespread seeding initiated');
           }
+        }
+
+        if (mode === 'controller') {
+          st.awaitingPatientZero = true;
+          st.paused = true;
+          // Deterministic controller start: index case in Manhattan (no hidden randomness).
+          const index = 'manhattan' as CountryID;
+          const startExposure = 2500;
+          seedExposureInPlace(st as any, index, startExposure);
+          st.events.unshift(`Index case detected in ${st.countries[index].name}`);
+          st.events.unshift('Select a borough to set your initial focus');
         }
       }),
       addDNA: (delta) => set((st) => { st.dna = Math.max(0, st.dna + delta); }),

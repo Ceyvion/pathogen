@@ -1,4 +1,5 @@
 import { ArcLayer, ScatterplotLayer, PathLayer } from '@deck.gl/layers';
+import { GL } from '@luma.gl/constants';
 
 export type Flow = {
   source: [number, number];
@@ -21,6 +22,11 @@ export function makeFlowsLayer(opts: { data: Flow[]; t?: number }) {
     getTargetColor: (d) => [255 * Math.min(1, d.iPrev * 40), 64, 64, alpha],
     greatCircle: true,
     pickable: false,
+    parameters: {
+      [GL.BLEND]: true,
+      [GL.BLEND_FUNC]: [GL.SRC_ALPHA, GL.ONE, GL.ONE, GL.ONE_MINUS_SRC_ALPHA],
+      [GL.BLEND_EQUATION]: GL.FUNC_ADD,
+    } as any,
   });
 }
 
@@ -54,6 +60,11 @@ export function makeFlowSparksLayer(opts: { data: Flow[]; t: number }) {
     stroked: false,
     pickable: false,
     getFillColor: (d: any) => [255 * Math.min(1, d.iPrev * 40 + 0.2), 100, 80, d.alpha],
+    parameters: {
+      [GL.BLEND]: true,
+      [GL.BLEND_FUNC]: [GL.SRC_ALPHA, GL.ONE, GL.ONE, GL.ONE_MINUS_SRC_ALPHA],
+      [GL.BLEND_EQUATION]: GL.FUNC_ADD,
+    } as any,
   });
 }
 
@@ -120,6 +131,11 @@ export function makeBridgeSparksLayer(opts: { data: BridgeFlow[]; t: number }) {
     stroked: false,
     pickable: false,
     getFillColor: (d: any) => [255 * Math.min(1, d.iPrev * 40 + 0.2), 100, 80, d.alpha],
-    parameters: { depthTest: false },
+    parameters: {
+      depthTest: false,
+      [GL.BLEND]: true,
+      [GL.BLEND_FUNC]: [GL.SRC_ALPHA, GL.ONE, GL.ONE, GL.ONE_MINUS_SRC_ALPHA],
+      [GL.BLEND_EQUATION]: GL.FUNC_ADD,
+    } as any,
   });
 }

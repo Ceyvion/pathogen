@@ -1,6 +1,7 @@
 import React from 'react';
 import { useGameStore } from '../../state/store';
 import { ShieldCheck, Biohazard, Beaker, Activity, Hospital, AlertTriangle, Trophy, Zap } from 'lucide-react';
+import { useUiStore } from '../../state/ui';
 
 function categorize(e: string): { icon: JSX.Element; label: string } {
   const t = e.toLowerCase();
@@ -19,8 +20,14 @@ export function BottomTicker() {
   const events = useGameStore((s) => s.events);
   const [open, setOpen] = React.useState(false);
   const latest = events[0];
+  const setHudHovering = useUiStore((s) => (s as any).setHudHovering as (v: boolean) => void);
   return (
-    <div className="panel glass bottom-ticker" aria-live="polite">
+    <div
+      className="panel glass bottom-ticker"
+      aria-live="polite"
+      onMouseEnter={() => setHudHovering(true)}
+      onMouseLeave={() => setHudHovering(false)}
+    >
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 22 }}>
           {latest ? (

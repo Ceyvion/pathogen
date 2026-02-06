@@ -1,4 +1,4 @@
-import { ScatterplotLayer } from '@deck.gl/layers';
+import { IconLayer } from '@deck.gl/layers';
 
 export type HospitalDot = {
   id: number;
@@ -10,35 +10,35 @@ export type HospitalDot = {
   beds?: number;
 };
 
+const ICONS = {
+  green: `data:image/svg+xml;utf8,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect width="64" height="64" rx="10" ry="10" fill="#16a34a"/><path d="M28 12h8v16h16v8H36v16h-8V36H12v-8h16z" fill="#EAECEF"/></svg>')}`,
+  amber: `data:image/svg+xml;utf8,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect width="64" height="64" rx="10" ry="10" fill="#f59e0b"/><path d="M28 12h8v16h16v8H36v16h-8V36H12v-8h16z" fill="#1E1E1E"/></svg>')}`,
+  red: `data:image/svg+xml;utf8,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect width="64" height="64" rx="10" ry="10" fill="#C62828"/><path d="M28 12h8v16h16v8H36v16h-8V36H12v-8h16z" fill="#EAECEF"/></svg>')}`,
+};
+
 export function makeHospitalsLayer(opts: {
   data: HospitalDot[];
   onClick?: (obj: HospitalDot) => void;
 }) {
   const { data, onClick } = opts;
-  return new ScatterplotLayer<HospitalDot>({
+  return new IconLayer<HospitalDot>({
     id: 'hospitals-layer',
     data,
     pickable: true,
-    radiusUnits: 'pixels',
-    stroked: true,
-    lineWidthUnits: 'pixels',
-    lineWidthMinPixels: 1.2,
+    sizeUnits: 'pixels',
     getPosition: (d) => d.ll,
-    getRadius: (d) => {
+    getIcon: (d) => {
       const load = d.capacity > 0 ? d.occupancy / d.capacity : 0;
-      return 6 + Math.min(20, (load * 20));
+      const url = load < 0.7 ? ICONS.green : load < 1.0 ? ICONS.amber : ICONS.red;
+      return { url, width: 64, height: 64, anchorY: 64 } as any;
     },
-    getFillColor: (d) => {
+    getSize: (d) => {
       const load = d.capacity > 0 ? d.occupancy / d.capacity : 0;
-      if (load < 0.7) return [16,185,129,220]; // green
-      if (load < 1.0) return [245,158,11,220]; // amber
-      return [239,68,68,220]; // red
+      return 22 + Math.min(12, load * 18);
     },
-    getLineColor: [17, 24, 39, 200],
     onHover: (info: any) => {
       try { (info.layer?.context?.deck?.canvas as HTMLCanvasElement).style.cursor = info?.object ? 'pointer' : ''; } catch {}
     },
     onClick: (info: any) => { if (info?.object && onClick) onClick(info.object as HospitalDot); },
-  });
+  }) as any;
 }
-

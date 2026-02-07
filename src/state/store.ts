@@ -13,6 +13,7 @@ type Actions = {
   setAutoCollectBubbles: (v: boolean) => void;
   bankPickup: (type: BubbleType, amount: number, ttlMs?: number) => void;
   collectBankedPickup: (id: number) => void;
+  collectAllBankedPickups: () => void;
   purgeExpiredPickups: (nowMs: number) => void;
   collectPickup: (type: BubbleType, amount: number) => void;
   selectCountry: (id: CountryID | null) => void;
@@ -48,6 +49,12 @@ export type GameStore = WorldState & { actions: Actions };
 // rarely reaches the 50ms step threshold, making time appear stuck until 3×/10×.
 let __simAccMs = 0;
 let __pickupId = 1;
+
+const PACING_PRESETS = {
+  slow: { msPerDay: 12_000, bubbleSpawnMs: 10_000 },
+  normal: { msPerDay: 8_000, bubbleSpawnMs: 7_200 },
+  fast: { msPerDay: 5_000, bubbleSpawnMs: 4_500 },
+} as const satisfies Record<'slow'|'normal'|'fast', { msPerDay: number; bubbleSpawnMs: number }>;
 
 const BORO_IDS = ['manhattan', 'brooklyn', 'queens', 'bronx', 'staten_island'] as const satisfies readonly CountryID[];
 
@@ -470,9 +477,9 @@ export const useGameStore = create<GameStore>()(
     day: 0,
     paused: false,
     speed: 1,
-    msPerDay: 2400, // ~2.4s per in-game day at 1x
+    msPerDay: PACING_PRESETS.normal.msPerDay, // ~8.0s per in-game day at 1x
     pacing: 'normal' as 'slow'|'normal'|'fast',
-    bubbleSpawnMs: 2200,
+    bubbleSpawnMs: PACING_PRESETS.normal.bubbleSpawnMs,
     autoCollectBubbles: initialAutoCollect,
     bankedPickups: [],
     dna: 0,
@@ -510,15 +517,15 @@ export const useGameStore = create<GameStore>()(
       }),
       setPacing: (p) => set((st) => {
         st.pacing = p;
-        if (p === 'slow') { st.msPerDay = 3200; st.bubbleSpawnMs = 2800; }
-        else if (p === 'fast') { st.msPerDay = 1400; st.bubbleSpawnMs = 1700; }
-        else { st.msPerDay = 2400; st.bubbleSpawnMs = 2200; }
+        const cfg = PACING_PRESETS[p] ?? PACING_PRESETS.normal;
+        st.msPerDay = cfg.msPerDay;
+        st.bubbleSpawnMs = cfg.bubbleSpawnMs;
       }),
       setAutoCollectBubbles: (v) => set((st) => {
         st.autoCollectBubbles = v;
         try { localStorage.setItem('autoCollectBubblesV1', v ? '1' : '0'); } catch {}
       }),
-      bankPickup: (type, amount, ttlMs = 5000) => set((st) => {
+      bankPickup: (type, amount, ttlMs = 12_000) => set((st) => {
         if (st.bankedPickups.length >= MAX_BANKED_PICKUPS) {
           // drop oldest to preserve "grace buffer" feel without infinite stacking
           st.bankedPickups.shift();
@@ -529,7 +536,9 @@ export const useGameStore = create<GameStore>()(
       }),
       purgeExpiredPickups: (nowMs) => set((st) => {
         if (!st.bankedPickups.length) return;
-        st.bankedPickups = st.bankedPickups.filter((p) => p.expiresAtMs > nowMs);
+        const next = st.bankedPickups.filter((p) => p.expiresAtMs > nowMs);
+        if (next.length === st.bankedPickups.length) return;
+        st.bankedPickups = next;
       }),
       collectBankedPickup: (id) => set((st) => {
         const idx = st.bankedPickups.findIndex((p) => p.id === id);
@@ -537,6 +546,11 @@ export const useGameStore = create<GameStore>()(
         const p = st.bankedPickups[idx];
         st.bankedPickups.splice(idx, 1);
         applyPickupReward(st, p.type, p.amount);
+      }),
+      collectAllBankedPickups: () => set((st) => {
+        if (!st.bankedPickups.length) return;
+        for (const p of st.bankedPickups) applyPickupReward(st, p.type, p.amount);
+        st.bankedPickups = [];
       }),
       collectPickup: (type, amount) => set((st) => {
         applyPickupReward(st, type, amount);
@@ -1039,9 +1053,9 @@ export const useGameStore = create<GameStore>()(
         st.day = 0;
         st.paused = false;
         st.speed = 1;
-        st.msPerDay = 2400;
+        st.msPerDay = PACING_PRESETS.normal.msPerDay;
         st.pacing = 'normal';
-        st.bubbleSpawnMs = 2200;
+        st.bubbleSpawnMs = PACING_PRESETS.normal.bubbleSpawnMs;
         st.dna = 0;
         st.countries = initialCountries();
         st.selectedCountryId = null;

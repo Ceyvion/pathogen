@@ -2,12 +2,13 @@ import React from 'react';
 import { useUiStore } from '../../state/ui';
 import { useGameStore } from '../../state/store';
 import type { Country } from '../../state/types';
+import { ArrowLeft, SunMoon } from 'lucide-react';
 
 const PATHOGENS = [
-  { id: 'virus', name: 'Virus', desc: 'Unstable mutations. Fast gains can backfire.' },
-  { id: 'bacteria', name: 'Bacteria', desc: 'Slower spread, harder to cure. Resistance matters.' },
-  { id: 'fungus', name: 'Fungus', desc: 'Bursts and chokepoints. Weather-driven surges.' },
-  { id: 'bioweapon', name: 'Bioweapon', desc: 'High lethality. Containment tools become essential.' },
+  { id: 'virus', name: 'Virus', desc: 'Rapid mutation. Unpredictable. What evolves fast can spiral out of control.' },
+  { id: 'bacteria', name: 'Bacteria', desc: 'Resilient. Persistent. Antibiotics will fail when you need them most.' },
+  { id: 'fungus', name: 'Fungus', desc: 'It waits. It erupts in waves. When conditions align, containment collapses.' },
+  { id: 'bioweapon', name: 'Bioweapon', desc: 'Engineered lethality. Every hour without containment is another body count.' },
 ] as const;
 
 const GENES = [
@@ -19,6 +20,9 @@ const GENES = [
 export function SetupScreen() {
   const { setup, setSetup, pendingMode, pendingStoryId, toGame } = useUiStore();
   const start = useGameStore((s) => s.actions.startNewGame);
+  const theme = useUiStore((s) => s.theme);
+  const toggleTheme = useUiStore((s) => s.toggleTheme);
+  const toTitle = useUiStore((s) => s.toTitle);
 
   const toggleGene = (id: any) => {
     const has = setup.genes.includes(id);
@@ -45,78 +49,106 @@ export function SetupScreen() {
   };
 
   return (
-    <div className="title-screen">
-      <div className="title-panel panel" style={{ textAlign: 'left' }}>
-        <h2 style={{ marginTop: 0 }}>Setup</h2>
-        <div className="muted" style={{ marginTop: -6, marginBottom: 8 }}>
-          {campaignKey === 'architect_free' && 'Pathogen Architect: free play'}
-          {campaignKey === 'controller_free' && 'City Response Controller: free play'}
-          {campaignKey === 'architect_patient_zero' && 'Story: Patient Zero — seed and spread stealthily'}
-          {campaignKey === 'controller_prologue' && 'Story: First Wave — stabilize hospitals and push the cure'}
-        </div>
-        <div className="row" style={{ gap: 16, flexWrap: 'wrap' }}>
-          <div style={{ flex: '1 1 280px' }}>
-            <div className="muted" style={{ marginBottom: 6 }}>Difficulty</div>
-            <div className="row" style={{ gap: 12 }}>
-              {(['casual','normal','brutal'] as const).map(d => (
-                <button key={d} type="button" onClick={() => setSetup({ difficulty: d })}
-                  className={`chip ${setup.difficulty===d?'active':''}`}
-                  aria-pressed={setup.difficulty===d}
-                >{d[0].toUpperCase()+d.slice(1)}</button>
-              ))}
-            </div>
+    <div className="title-screen setup-screen">
+      <div className="title-panel panel glass setup-panel">
+        <div className="setup-top">
+          <button className="btn" onClick={toTitle} title="Back to mode select"><ArrowLeft size={16} /> Back</button>
+          <div className="setup-top-right">
+            <button className="btn" onClick={toggleTheme} title="Toggle light/dark theme">
+              <SunMoon size={16} /> Theme: {theme === 'light' ? 'Light' : 'Dark'}
+            </button>
+            <button className="btn" onClick={begin}>Begin</button>
           </div>
-          {!isStory && (
-            <div style={{ flex: '1 1 420px' }}>
-              <div className="muted" style={{ marginBottom: 6 }}>Pathogen Type</div>
+        </div>
+
+        <div className="setup-head">
+          <h2>Mission Brief</h2>
+          <div className="setup-sub">
+            {campaignKey === 'architect_free' && 'Pathogen Architect: free play'}
+            {campaignKey === 'controller_free' && 'City Response Controller: free play'}
+            {campaignKey === 'architect_patient_zero' && 'Story: Patient Zero — seed and spread stealthily'}
+            {campaignKey === 'controller_prologue' && 'Story: First Wave — stabilize hospitals and push the cure'}
+          </div>
+        </div>
+
+        <div className="setup-grid">
+          <div className="setup-col">
+            <div className="setup-block">
+              <div className="setup-kicker">Difficulty</div>
               <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
-                {PATHOGENS.map((p) => (
-                  <button
-                    key={p.id}
-                    type="button"
-                    className={`chip ${setup.pathogenType === p.id ? 'active' : ''}`}
-                    onClick={() => setSetup({ pathogenType: p.id as any })}
-                    aria-pressed={setup.pathogenType === p.id}
-                    title={p.desc}
-                  >
-                    {p.name}
-                  </button>
+                {(['casual','normal','brutal'] as const).map(d => (
+                  <button key={d} type="button" onClick={() => setSetup({ difficulty: d })}
+                    className={`chip ${setup.difficulty===d?'active':''}`}
+                    aria-pressed={setup.difficulty===d}
+                  >{d[0].toUpperCase()+d.slice(1)}</button>
                 ))}
               </div>
-              <div className="muted" style={{ marginTop: 6 }}>
-                {PATHOGENS.find((p) => p.id === setup.pathogenType)?.desc}
+            </div>
+
+            {!isStory && (
+              <div className="setup-block">
+                <div className="setup-kicker">Pathogen Type</div>
+                <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
+                  {PATHOGENS.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      className={`chip ${setup.pathogenType === p.id ? 'active' : ''}`}
+                      onClick={() => setSetup({ pathogenType: p.id as any })}
+                      aria-pressed={setup.pathogenType === p.id}
+                      title={p.desc}
+                    >
+                      {p.name}
+                    </button>
+                  ))}
+                </div>
+                <div className="muted" style={{ marginTop: 6 }}>
+                  {PATHOGENS.find((p) => p.id === setup.pathogenType)?.desc}
+                </div>
+              </div>
+            )}
+
+            <div className="setup-block">
+              <div className="setup-kicker">How This Run Starts</div>
+              <div className="setup-how">
+                <div className="setup-step"><span className="badge">1</span> Press <span className="setup-mono">Begin</span></div>
+                <div className="setup-step"><span className="badge">2</span> Click a borough on the map to place Patient Zero / set focus</div>
+                <div className="setup-step"><span className="badge">3</span> Spend {isArchitect ? 'DNA' : 'Ops'} in the Lab and watch the city react</div>
               </div>
             </div>
-          )}
-          <div style={{ flex: '2 1 420px' }}>
-            <div className="muted" style={{ marginBottom: 6 }}>Genes</div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))', gap: 10 }}>
-              {GENES.filter(g => isArchitect ? g.id !== 'efficient_bureaucracy' : g.id !== 'urban_adaptation')
-                .map(g => (
-                <label key={g.id} className={`mode-card`} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, cursor: 'pointer' }}>
-                  <input type="checkbox" checked={setup.genes.includes(g.id as any)} onChange={() => toggleGene(g.id)} />
-                  <div>
-                    <div className="mode-title" style={{ margin: 0 }}>{g.name}</div>
-                    <div className="mode-desc" style={{ margin: 0 }}>{g.desc}</div>
-                  </div>
-                </label>
-              ))}
+          </div>
+
+          <div className="setup-col">
+            <div className="setup-block">
+              <div className="setup-kicker">Genes</div>
+              <div className="setup-genes">
+                {GENES.filter(g => isArchitect ? g.id !== 'efficient_bureaucracy' : g.id !== 'urban_adaptation')
+                  .map(g => (
+                  <label key={g.id} className="setup-gene">
+                    <input type="checkbox" checked={setup.genes.includes(g.id as any)} onChange={() => toggleGene(g.id)} />
+                    <div>
+                      <div className="setup-gene-name">{g.name}</div>
+                      <div className="setup-gene-desc">{g.desc}</div>
+                    </div>
+                  </label>
+                ))}
+              </div>
             </div>
           </div>
         </div>
 
         {/* Campaign-specific options */}
         {campaignKey === 'architect_free' && (
-          <div className="row" style={{ gap: 16, marginTop: 12, flexWrap: 'wrap' }}>
-            <div className="panel glass" style={{ padding: 12, flex: '2 1 420px' }}>
-              <div className="muted" style={{ marginBottom: 6 }}>Start Method</div>
+          <div className="setup-wide">
+            <div className="panel glass setup-wide-card">
+              <div className="setup-kicker">Start Method</div>
               <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
                 {(['pick','random','widespread'] as const).map(m => (
                   <button key={m} className={`chip ${setup.seedMode===m?'active':''}`} onClick={() => setSetup({ seedMode: m })}>{m === 'pick' ? 'Pick on Map' : m === 'random' ? 'Random Borough' : 'Widespread (sandbox)'}</button>
                 ))}
               </div>
               <div style={{ marginTop: 10 }}>
-                <div className="muted" style={{ marginBottom: 6 }}>Initial infections</div>
+                <div className="setup-kicker">Initial infections</div>
                 <input type="range" min={2000} max={50000} step={1000} value={setup.seedAmount} onChange={(e) => setSetup({ seedAmount: Number(e.target.value) })} />
                 <div className="muted">{setup.seedAmount.toLocaleString()} people</div>
               </div>
@@ -137,17 +169,17 @@ export function SetupScreen() {
         )}
 
         {campaignKey === 'controller_free' && (
-          <div className="row" style={{ gap: 16, marginTop: 12, flexWrap: 'wrap' }}>
-            <div className="panel glass" style={{ padding: 12, flex: '1 1 320px' }}>
-              <div className="muted" style={{ marginBottom: 6 }}>Initial Policy</div>
+          <div className="setup-wide">
+            <div className="panel glass setup-wide-card">
+              <div className="setup-kicker">Initial Policy</div>
               <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
                 {(['open','advisory','restrictions','lockdown'] as Country['policy'][]).map(p => (
                   <button key={p} className={`chip ${setup.initialPolicy===p?'active':''}`} onClick={() => setSetup({ initialPolicy: p })}>{p}</button>
                 ))}
               </div>
             </div>
-            <div className="panel glass" style={{ padding: 12, flex: '1 1 320px' }}>
-              <div className="muted" style={{ marginBottom: 6 }}>Starting Ops Points</div>
+            <div className="panel glass setup-wide-card">
+              <div className="setup-kicker">Starting Ops Points</div>
               <input type="range" min={0} max={24} step={1} value={setup.startingOps} onChange={(e) => setSetup({ startingOps: Number(e.target.value) })} />
               <div className="muted">{setup.startingOps} points</div>
             </div>
@@ -175,11 +207,8 @@ export function SetupScreen() {
             </div>
           </div>
         )}
-        <div className="row" style={{ justifyContent: 'space-between', marginTop: 16, alignItems: 'center' }}>
-          <div className="muted" style={{ fontSize: 12 }}>
-            {isArchitect ? 'Tip: Pick on Map to place Patient Zero precisely.' : 'Tip: After you begin, click a borough to start the scenario and set your initial focus.'}
-          </div>
-          <button className="btn" onClick={begin}>Begin</button>
+        <div className="muted" style={{ fontSize: 12, marginTop: 14 }}>
+          {isArchitect ? 'Tip: Pick on Map to place Patient Zero precisely.' : 'Tip: After you begin, click a borough to start the scenario and set your initial focus.'}
         </div>
       </div>
     </div>

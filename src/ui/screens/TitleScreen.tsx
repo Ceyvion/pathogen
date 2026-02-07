@@ -15,19 +15,19 @@ export function TitleScreen() {
   return (
     <div className="title-screen">
       <div className="title-panel panel">
-        <h1>NYC Outbreak</h1>
-        <p className="muted">Choose your side and control the fate of the city.</p>
+        <h1>Pathogen</h1>
+        <p className="muted">Choose your side. Control the fate of eight million.</p>
         <div className="mode-grid">
           <button className="mode-card" onClick={() => startMode('architect')}>
             <div className="mode-icon"><Biohazard size={32} /></div>
             <div className="mode-title">Pathogen Architect</div>
-            <div className="mode-desc">Evolve your virus, outpace the cure, overwhelm the city.</div>
+            <div className="mode-desc">Evolve a disease. Mutate. Adapt. Overwhelm the city before they find the cure.</div>
             <div className="mode-cta"><Play size={16}/> Start</div>
           </button>
           <button className="mode-card" onClick={() => startMode('controller')}>
             <div className="mode-icon"><ShieldCheck size={32} /></div>
             <div className="mode-title">City Response Controller</div>
-            <div className="mode-desc">Deploy policies and research to save lives and stabilize NYC.</div>
+            <div className="mode-desc">Hospitals are filling. The clock is ticking. Hold the line — or lose everything.</div>
             <div className="mode-cta"><Play size={16}/> Start</div>
           </button>
         </div>

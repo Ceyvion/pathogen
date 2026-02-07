@@ -18,3 +18,5 @@ dist/
 # Test/coverage
 coverage/
 
+# Local clones / scratch work (keep nested repos out of this repo's git status)
+external/

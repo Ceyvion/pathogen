@@ -4,19 +4,20 @@ import { useGameStore } from '../../state/store';
 import { useUiStore } from '../../state/ui';
 import { Tooltip } from '../system/Tooltip';
 import { Switch } from '../system/Switch';
-import { SeparatorHorizontal, Play, Pause, GaugeCircle, Film, Rocket, RotateCcw, CloudMoon, Palette, Music2, VolumeX, SkipForward, LayoutPanelLeft, Zap } from 'lucide-react';
+import { SeparatorHorizontal, Play, Pause, GaugeCircle, Film, Rocket, RotateCcw, CloudMoon, Palette, Music2, VolumeX, SkipForward, LayoutPanelLeft, Zap, SunMoon } from 'lucide-react';
 import * as bgm from '../../audio/bgm';
 
 export function CommandBar() {
   const speed = useGameStore((s) => s.speed);
   const paused = useGameStore((s) => s.paused);
   const day = useGameStore((s) => Math.floor(s.t / s.msPerDay));
+  const secPerDay = useGameStore((s) => s.msPerDay / 1000);
   const mode = useGameStore((s) => s.mode);
   const pathogenType = useGameStore((s) => s.pathogenType);
   const cure = useGameStore((s) => s.cureProgress);
   const autoCollect = useGameStore((s) => s.autoCollectBubbles);
   const actions = useGameStore((s) => s.actions);
-  const pacing = useGameStore((s) => (s as any).pacing as 'slow'|'normal'|'fast');
+  const pacing = useGameStore((s) => s.pacing);
 
   const toggleStats = useUiStore((s) => s.toggleStats);
   const toggleUpgrades = useUiStore((s) => s.toggleUpgrades);
@@ -30,6 +31,9 @@ export function CommandBar() {
   const setPreset = useUiStore((s) => (s as any).setPreset as (p: 'default'|'neo'|'emergency') => void);
   const hudCompact = useUiStore((s) => (s as any).hudCompact as boolean);
   const setHudCompact = useUiStore((s) => (s as any).setHudCompact as (v: boolean) => void);
+  const theme = useUiStore((s) => (s as any).theme as 'dark'|'light');
+  const toggleTheme = useUiStore((s) => (s as any).toggleTheme as () => void);
+  const nextTheme = theme === 'light' ? 'dark' : 'light';
 
   useEffect(() => {
     // init background music discovery/playback
@@ -66,7 +70,7 @@ export function CommandBar() {
       initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} transition={{ type: 'spring', stiffness: 220, damping: 26 }}
     >
       <div className="cmd-left">
-        <div className="cmd-title">NYC Outbreak</div>
+        <div className="cmd-title">PATHOGEN</div>
         <div className="cmd-sub">Day {day} · {mode === 'architect' ? 'Pathogen Architect' : 'City Response Controller'} · {pathogenType[0].toUpperCase() + pathogenType.slice(1)}</div>
       </div>
       <div className="cmd-center">
@@ -80,13 +84,21 @@ export function CommandBar() {
           <button className={`seg ${!paused && speed === 10 ? 'active' : ''}`} onClick={() => actions.setSpeed(10)}>10×</button>
           <button className={`seg`} onClick={actions.togglePause}>{paused ? <><Play size={14}/> Resume</> : <><Pause size={14}/> Pause</>}</button>
         </div>
-        <div className="seg-controls" role="group" aria-label="pacing controls">
+        <div
+          className="seg-controls"
+          role="group"
+          aria-label="pacing controls"
+          title={`Pacing controls how fast in-game days pass. Current: ~${secPerDay.toFixed(1)}s per day at 1×.`}
+        >
           <button className={`seg ${pacing === 'slow' ? 'active' : ''}`} onClick={() => actions.setPacing('slow')}>Slow</button>
           <button className={`seg ${pacing === 'normal' ? 'active' : ''}`} onClick={() => actions.setPacing('normal')}>Normal</button>
           <button className={`seg ${pacing === 'fast' ? 'active' : ''}`} onClick={() => actions.setPacing('fast')}>Fast</button>
         </div>
       </div>
       <div className="cmd-right">
+        <Tooltip label={`Switch to ${nextTheme} theme`}>
+          <button className="icon-btn" aria-label="Toggle theme" aria-pressed={theme === 'light'} onClick={() => toggleTheme()}><SunMoon size={16} /></button>
+        </Tooltip>
         <Tooltip label={`Theme: ${preset}`}>
           <button className="icon-btn" aria-label="Cycle theme preset" onClick={() => {
             const order: any = { 'default': 'neo', 'neo': 'emergency', 'emergency': 'default' };

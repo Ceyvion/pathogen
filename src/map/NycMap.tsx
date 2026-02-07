@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import maplibregl, { Map, NavigationControl, ScaleControl } from 'maplibre-gl';
+import maplibregl, { Map, NavigationControl, ScaleControl, AttributionControl } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { useGameStore } from '../state/store';
 import { useUiStore } from '../state/ui';
@@ -9,6 +9,7 @@ import { PostProcessEffect } from '@deck.gl/core';
 import { ScatterplotLayer, ArcLayer } from '@deck.gl/layers';
 import { GL } from '@luma.gl/constants';
 import HOSPITALS from '../assets/nyc-hospitals.json';
+import BORO_URL from '../assets/nyc-boroughs.geojson?url';
 import { playBubble } from '../audio/sfx';
 import { makeBubblesLayer } from './layers/bubbles';
 import { makeHospitalsLayer } from './layers/hospitals';
@@ -36,11 +37,32 @@ function rasterFallbackStyle() {
   } as any;
 }
 
-function buildStyle() {
+function buildStyle(theme: 'dark' | 'light') {
   const key = import.meta.env.VITE_MAPTILER_KEY as string | undefined;
+  // Allow setting a full style URL; attempt to keep it in sync if it matches MapTiler's
+  // common "/maps/<name>/style.json" structure.
+  const explicit = (import.meta.env.VITE_MAP_STYLE as string | undefined);
+  if (explicit && (explicit.startsWith('http://') || explicit.startsWith('https://'))) {
+    const m = explicit.match(/\/maps\/([^/]+)\/style\.json/i);
+    if (m?.[1]) {
+      const name = m[1];
+      const isDark = name.endsWith('-dark');
+      const nextName = theme === 'light'
+        ? (isDark ? name.slice(0, -5) : name)
+        : (isDark ? name : `${name}-dark`);
+      return explicit.replace(`/maps/${name}/style.json`, `/maps/${nextName}/style.json`);
+    }
+    return explicit;
+  }
+
   if (key) {
-    // Prefer a dark vector style for in-game visuals
-    const styleName = (import.meta.env.VITE_MAP_STYLE as string | undefined) || 'dataviz-dark';
+    // Prefer a dark vector style by default, but keep basemap in sync with UI theme.
+    // If an explicit style is provided, allow theme to pick its sibling when it follows
+    // the common "<name>-dark" convention (ex: dataviz <-> dataviz-dark).
+    let styleName = explicit || (theme === 'light' ? 'dataviz' : 'toner-dark');
+    if (explicit && explicit.endsWith('-dark')) {
+      styleName = theme === 'light' ? explicit.slice(0, -5) : explicit;
+    }
     return `https://api.maptiler.com/maps/${styleName}/style.json?key=${key}`;
   }
   // Raster fallback using OSM tiles via MapLibre style schema
@@ -74,6 +96,9 @@ export function NycMap() {
   const effectsRef = useRef<any[]>([]);
   const uiObstaclesRef = useRef<Array<{ left: number; top: number; right: number; bottom: number }>>([]);
   const lastUiObstaclesUpdateRef = useRef<number>(0);
+  // Recreate MapLibre map on theme changes so basemap style matches UI theme.
+  const theme = useUiStore((s) => s.theme);
+  const cameraStateRef = useRef<{ center: [number, number]; zoom: number; bearing: number; pitch: number } | null>(null);
 
   function returnNull() {}
 
@@ -81,23 +106,27 @@ export function NycMap() {
 
   useEffect(() => {
     if (!ref.current) return;
-    const style = buildStyle();
+    const initialCamera = cameraStateRef.current;
+    const style = buildStyle(theme);
     const fallback = rasterFallbackStyle();
       const map = new maplibregl.Map({
         container: ref.current,
         style,
-        center: NYC_CENTER,
-        zoom: 11.5,
-        pitch: 38,
-        bearing: -15,
+        center: (initialCamera?.center || NYC_CENTER) as any,
+        zoom: initialCamera?.zoom ?? 11.5,
+        pitch: initialCamera?.pitch ?? 38,
+        bearing: initialCamera?.bearing ?? -15,
         minZoom: 9.5,
         maxZoom: 17,
         maxBounds: NYC_BOUNDS as any,
         renderWorldCopies: false,
         hash: false,
+        // We'll add a compact attribution control ourselves to keep the HUD tidy.
+        attributionControl: false,
       });
     mapRef.current = map;
     map.addControl(new NavigationControl({ visualizePitch: true }), 'bottom-right');
+    map.addControl(new AttributionControl({ compact: true }), 'bottom-right');
     map.addControl(new ScaleControl({ unit: 'imperial' }), 'bottom-left');
     // expose reset view for UI button
     (window as any).resetNYCView = () => {
@@ -121,8 +150,8 @@ export function NycMap() {
               'source-layer': 'building',
               minzoom: 14,
               paint: {
-                'fill-extrusion-color': '#334155',
-                'fill-extrusion-opacity': 0.25,
+                'fill-extrusion-color': '#111111',
+                'fill-extrusion-opacity': 0.4,
                 'fill-extrusion-height': ['coalesce', ['get', 'render_height'], ['get', 'height'], 20],
                 'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], ['get', 'min_height'], 0]
               }
@@ -134,7 +163,7 @@ export function NycMap() {
       try { (window as any).nycMap = map; } catch {}
       // Constrain and fit to NYC bounds
       map.setMaxBounds(NYC_BOUNDS as any);
-      map.fitBounds(NYC_BOUNDS as any, { padding: 24, duration: 0 });
+      if (!initialCamera) map.fitBounds(NYC_BOUNDS as any, { padding: 24, duration: 0 });
       // Lock rotation to avoid disorientation
       // Keep user rotation disabled to avoid disorientation; we animate bearing programmatically
       map.dragRotate.disable();
@@ -145,8 +174,21 @@ export function NycMap() {
       map.on('zoomstart', lockNow);
       map.on('rotatestart', lockNow);
 
+      // Oppressive sky/fog atmosphere (vector styles only; gracefully ignored on raster)
+      try {
+        (map as any).setSky({
+          'sky-color': '#020402',
+          'horizon-color': '#061008',
+          'fog-color': '#040a04',
+          'fog-ground-blend': 0.8,
+          'horizon-fog-blend': 0.95,
+          'sky-horizon-blend': 0.3,
+          'atmosphere-blend': 0.7,
+        });
+      } catch {}
+
       // Add borough polygons from a public GeoJSON
-      const boroughUrl = 'https://raw.githubusercontent.com/dwillis/nyc-maps/master/boroughs.geojson';
+      const boroughUrl = BORO_URL;
       // Use promoteId to make feature-state updates reliable
       map.addSource('boroughs', { type: 'geojson', data: boroughUrl, promoteId: 'BoroCode' });
 
@@ -155,6 +197,7 @@ export function NycMap() {
         try {
           // Map store keys -> feature ids (BoroCode)
           const newMap: Record<string, number | string> = {};
+          const ringsByBoro: Record<string, [number, number][][]> = {};
           for (const f of data.features || []) {
             const id = f.properties?.BoroCode;
             const boro = f.properties && (f.properties.BoroName || f.properties.borough || f.properties.name);
@@ -197,6 +240,20 @@ export function NycMap() {
               };
               const b = extent(geom);
               if (b) boundsRef.current[s] = b;
+
+              // Cache borough outer rings so we can generate synthetic "neighborhood" points
+              // locally (avoids remote GeoJSON fetches that can 404 / CORS).
+              try {
+                const rings: [number, number][][] = [];
+                if (geom?.type === 'Polygon' && Array.isArray((geom as any).coordinates?.[0])) {
+                  rings.push((geom as any).coordinates[0] as [number, number][]);
+                } else if (geom?.type === 'MultiPolygon' && Array.isArray((geom as any).coordinates)) {
+                  for (const poly of (geom as any).coordinates) {
+                    if (Array.isArray(poly?.[0]) && poly[0].length) rings.push(poly[0] as [number, number][]);
+                  }
+                }
+                if (rings.length) ringsByBoro[s] = rings;
+              } catch {}
             }
           }
           idMapRef.current = newMap;
@@ -227,13 +284,14 @@ export function NycMap() {
             ],
           } as any;
           map.addSource('nyc-mask', { type: 'geojson', data: mask });
+          const dimIsLight = theme === 'light';
           const dimLayer = {
             id: 'nyc-dim',
             type: 'fill' as const,
             source: 'nyc-mask',
             paint: {
-              'fill-color': '#0b0f14',
-              'fill-opacity': 0.55,
+              'fill-color': dimIsLight ? '#f0f4f0' : '#020402',
+              'fill-opacity': dimIsLight ? 0.72 : 0.72,
             }
           };
           const before = map.getLayer('borough-fills') ? 'borough-fills' : undefined;
@@ -244,248 +302,147 @@ export function NycMap() {
           // Initial paint with current store values
           applyInfectionToMap();
           applySelectionToMap();
-        } catch {}
-      }).catch(() => {});
 
-      // Neighborhood nodes (centroids) layer for zoomed-in detail
-      const neighborhoodsUrlCandidates = [
-        'https://raw.githubusercontent.com/dwillis/nyc-maps/master/nta2010.geojson',
-        'https://raw.githubusercontent.com/dwillis/nyc-maps/master/nynta2010.geojson',
-      ];
-      const pickNeighborhoodUrl = async (): Promise<string|undefined> => {
-        for (const u of neighborhoodsUrlCandidates) {
+          // Build local "neighborhood" points + hospital nodes for deck overlays.
+          // This replaces remote neighborhood GeoJSON + NYC Open Data fetches, which are fragile
+          // (404/CORS) and can make the map feel like it "loads weird" or errors on zoom.
           try {
-            const r = await fetch(u, { method: 'HEAD' });
-            if (r.ok) return u;
-          } catch {}
-        }
-        return undefined;
-      };
-      (async () => {
-        try {
-          const url = await pickNeighborhoodUrl();
-          if (!url) return;
-          const data = await fetch(url).then(r => r.json());
-          const pts: any[] = [];
-          const byBoro: Record<string, any[]> = {};
-          const centroidOf = (geom: any): [number, number] | null => {
-            try {
-              if (!geom) return null;
-              const avg = (arr: [number, number][]) => {
-                let sx = 0, sy = 0; const n = arr.length || 1; for (const p of arr) { sx += p[0]; sy += p[1]; }
-                return [sx / n, sy / n] as [number, number];
-              };
-              if (geom.type === 'Polygon') {
-                const ring = geom.coordinates?.[0];
-                if (Array.isArray(ring) && ring.length) return avg(ring as any);
-              } else if (geom.type === 'MultiPolygon') {
-                const ring = geom.coordinates?.[0]?.[0];
-                if (Array.isArray(ring) && ring.length) return avg(ring as any);
-              }
-            } catch {}
-            return null;
-          };
-          for (const f of data.features || []) {
-            const p = f.properties || {};
-            const boroRaw = p.BoroName || p.borough || p.boro || p.BORO || p.BORONAME || p.boroname || p.BORONM || '';
-            const boro = String(boroRaw || '').trim();
-            const hood = p.NTAName || p.neighborhood || p.NEIGHBORHO || p.NTAName || p.NTA || p.name || '';
-            const c = centroidOf(f.geometry);
-            if (!c) continue;
-            const feature = { type: 'Feature', properties: { boro, name: String(hood || '').trim() }, geometry: { type: 'Point', coordinates: c } };
-            pts.push(feature);
-            const key = slug(boro);
-            if (!byBoro[key]) byBoro[key] = [];
-            byBoro[key].push(feature);
-          }
-          hoodNodesRef.current = pts;
-          hoodNodesByBoroRef.current = byBoro;
-          map.addSource('hood-nodes', { type: 'geojson', data: { type: 'FeatureCollection', features: pts } as any });
-          map.addLayer({
-            id: 'hood-nodes',
-            type: 'circle',
-            source: 'hood-nodes',
-            minzoom: 12.3,
-            paint: {
-              'circle-radius': 4.0,
-              'circle-color': '#f59e0b',
-              'circle-stroke-color': '#111827',
-              'circle-stroke-width': 1.2,
-              'circle-opacity': 0.9,
-            }
-          });
-          map.addLayer({
-            id: 'hood-labels',
-            type: 'symbol',
-            source: 'hood-nodes',
-            minzoom: 13.5,
-            layout: {
-              'text-field': ['get', 'name'],
-              'text-size': 11,
-              'text-offset': [0, 1.0],
-              'text-anchor': 'top',
-            },
-            paint: {
-              'text-color': '#e5e7eb',
-              'text-halo-color': '#0b0f14',
-              'text-halo-width': 1.2,
-            }
-          });
-          // hover popup for hoods
-          const hoodPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
-          map.on('mousemove', 'hood-nodes', (e: any) => {
-            const f = e.features?.[0];
-            if (!f) { hoodPopup.remove(); return; }
-            (map.getCanvas() as HTMLCanvasElement).style.cursor = 'pointer';
-            const name = f.properties?.name || '';
-            hoodPopup.setLngLat(e.lngLat).setHTML(`<div style="font: 12px system-ui;">${name}</div>`).addTo(map);
-          });
-          map.on('mouseleave', 'hood-nodes', () => { (map.getCanvas() as HTMLCanvasElement).style.cursor = ''; hoodPopup.remove(); });
-
-          // Build hospital nodes: prefer real locations from asset, fallback to synthetic centroids
-          const st = useGameStore.getState();
-          const capPerPerson = (st.params.hospCapacityPerK / 1000);
-          const byBoroHosp: Record<string, any[]> = {};
-          const assetHospitals = (HOSPITALS as any[]).filter(h => h && h.boroKey && Array.isArray(h.ll) && h.ll.length === 2);
-          for (const h of assetHospitals) {
-            const key = String(h.boroKey);
-            if (!byBoroHosp[key]) byBoroHosp[key] = [];
-            byBoroHosp[key].push(h);
-          }
-          const hospitals: Array<{ id: number; boroKey: string; name: string; ll: [number, number]; capacity: number; beds?: number }> = [];
-          for (const boroKey of Object.keys(st.countries)) {
-            const totalCapBoro = capPerPerson * st.countries[boroKey].pop;
-            const list = byBoroHosp[boroKey];
-            if (list && list.length) {
-              const totalBeds = list.reduce((s, h: any) => s + (Number(h.beds) || 1), 0) || list.length;
-              for (const h of list) {
-                const weight = (Number(h.beds) || 1) / totalBeds;
-                const capacity = totalCapBoro * weight;
-                hospitals.push({ id: idCounterRef.current++, boroKey, name: String(h.name), ll: h.ll as [number, number], capacity, beds: Number(h.beds) || undefined });
-              }
-            } else {
-              // Fallback: place a few synthetic facilities using neighborhood nodes/centroids
-              const boroName = nameMapRef.current[boroKey] || boroKey;
-              const nodes = byBoro[boroKey] || [];
-              const count = Math.max(2, Math.min(5, Math.floor((st.countries[boroKey].pop / 400_000))));
-              for (let i=0;i<count;i++) {
-                let ll = centroidRef.current[boroKey] || NYC_CENTER;
-                if (nodes.length) {
-                  const pick = nodes[(i * 7) % nodes.length];
-                  const coords = pick?.geometry?.coordinates;
-                  if (Array.isArray(coords) && coords.length >= 2) ll = coords as [number, number];
-                }
-                const capacity = totalCapBoro / count;
-                hospitals.push({ id: idCounterRef.current++, boroKey, name: `${boroName} Hospital ${i+1}`, ll, capacity });
-              }
-            }
-          }
-          hospitalNodesRef.current = hospitals;
-          // seed policy dots from hood nodes; damp value will be updated in render loop
-          const dots = pts.map((f, idx) => ({ id: idx + 1, ll: f.geometry.coordinates as [number, number], damp: 0 }));
-          policyDotsRef.current = dots;
-        } catch {}
-      })();
-
-      // Ensure hospitals are available even if neighborhood fetch fails
-      (async () => {
-        try {
-          if (hospitalNodesRef.current.length) return;
-          const st = useGameStore.getState();
-          const capPerPerson = (st.params.hospCapacityPerK / 1000);
-          const byBoroHosp: Record<string, any[]> = {};
-          const assetHospitals = (HOSPITALS as any[]).filter(h => h && h.boroKey && Array.isArray(h.ll) && h.ll.length === 2);
-          for (const h of assetHospitals) {
-            const key = String(h.boroKey);
-            if (!byBoroHosp[key]) byBoroHosp[key] = [];
-            byBoroHosp[key].push(h);
-          }
-          const hospitals: Array<{ id: number; boroKey: string; name: string; ll: [number, number]; capacity: number; beds?: number }> = [];
-          for (const boroKey of Object.keys(st.countries)) {
-            const totalCapBoro = capPerPerson * st.countries[boroKey].pop;
-            const list = byBoroHosp[boroKey] || [];
-            if (list.length) {
-              const totalBeds = list.reduce((s, h: any) => s + (Number(h.beds) || 1), 0) || list.length;
-              for (const h of list) {
-                const weight = (Number(h.beds) || 1) / totalBeds;
-                const capacity = totalCapBoro * weight;
-                hospitals.push({ id: idCounterRef.current++, boroKey, name: String(h.name), ll: h.ll as [number, number], capacity, beds: Number(h.beds) || undefined });
-              }
-            } else {
-              const boroName = nameMapRef.current[boroKey] || boroKey;
-              let ll = centroidRef.current[boroKey] || NYC_CENTER;
-              const capacity = totalCapBoro;
-              hospitals.push({ id: idCounterRef.current++, boroKey, name: `${boroName} Hospital`, ll, capacity });
-            }
-          }
-          hospitalNodesRef.current = hospitals;
-        } catch {}
-      })();
-
-      // Attempt live hospital fetch (NYC Open Data) with localStorage caching; fall back to bundled JSON
-      (async () => {
-        try {
-          const cacheKey = 'nycHospitalsLiveV1';
-          const cached = localStorage.getItem(cacheKey);
-          let parsed: any[] | null = null;
-          if (cached) {
-            try {
-              const { ts, data } = JSON.parse(cached);
-              if (Date.now() - (ts || 0) < 24 * 3600 * 1000 && Array.isArray(data)) parsed = data;
-            } catch {}
-          }
-          const useData = async () => {
-            if (parsed && parsed.length) return parsed;
-            // Candidate endpoints (Socrata). We try HHC facilities first; this includes public hospitals.
-            const candidates = [
-              'https://data.cityofnewyork.us/resource/kxmf-j285.json?$limit=500',
-              'https://data.cityofnewyork.us/resource/ymhw-9cz9.json?$limit=500'
-            ];
-            for (const u of candidates) {
-              try {
-                const r = await fetch(u);
-                if (!r.ok) continue;
-                const rows = await r.json();
-                if (!Array.isArray(rows) || rows.length === 0) continue;
-                const out: any[] = [];
-                for (const row of rows) {
-                  const name = row.Facility_Name || row.facility_name || row.name || row.Facility || row.site_name;
-                  const boro = (row.Borough || row.borough || row.boro || row.county || '').toString();
-                  const lat = Number(row.latitude || row.Latitude || row.location?.latitude || row.the_geom?.coordinates?.[1]);
-                  const lon = Number(row.longitude || row.Longitude || row.location?.longitude || row.the_geom?.coordinates?.[0]);
-                  const type = (row.Facility_Type || row.facility_type || '').toString().toLowerCase();
-                  if (!name || !boro || !Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-                  if (type && !type.includes('hospital')) continue;
-                  out.push({ name: String(name), boroKey: (boro || '').toLowerCase().replace(/\s+/g, '_'), ll: [lon, lat] as [number, number] });
-                }
-                if (out.length) {
-                  try { localStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), data: out })); } catch {}
-                  return out;
-                }
-              } catch {}
-            }
-            return [];
-          };
-          const live = await useData();
-          if (Array.isArray(live) && live.length) {
             const st = useGameStore.getState();
+
+            const ringArea = (ring: [number, number][]) => {
+              let sum = 0;
+              for (let i = 0; i < ring.length; i++) {
+                const a = ring[i];
+                const b = ring[(i + 1) % ring.length];
+                sum += a[0] * b[1] - b[0] * a[1];
+              }
+              return sum / 2;
+            };
+
+            const bboxOfRing = (ring: [number, number][]) => {
+              let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+              for (const p of ring) {
+                const x = p[0], y = p[1];
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+              }
+              return { minX, minY, maxX, maxY };
+            };
+
+            const pointInRing = (pt: [number, number], ring: [number, number][]) => {
+              const x = pt[0], y = pt[1];
+              let inside = false;
+              for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+                const xi = ring[i][0], yi = ring[i][1];
+                const xj = ring[j][0], yj = ring[j][1];
+                const intersect = ((yi > y) !== (yj > y)) && (x < ((xj - xi) * (y - yi)) / (yj - yi) + xi);
+                if (intersect) inside = !inside;
+              }
+              return inside;
+            };
+
+            const sampleInRing = (
+              ring: [number, number][],
+              bbox: { minX: number; minY: number; maxX: number; maxY: number },
+              tries: number
+            ): [number, number] | null => {
+              for (let t = 0; t < tries; t++) {
+                const x = bbox.minX + Math.random() * (bbox.maxX - bbox.minX);
+                const y = bbox.minY + Math.random() * (bbox.maxY - bbox.minY);
+                const pt: [number, number] = [x, y];
+                if (pointInRing(pt, ring)) return pt;
+              }
+              return null;
+            };
+
+            const pts: any[] = [];
+            const byBoro: Record<string, any[]> = {};
+
+            for (const boroKey of Object.keys(st.countries)) {
+              const boroName = nameMapRef.current[boroKey] || boroKey;
+              const rings = ringsByBoro[boroKey] || [];
+              const meta = rings.map((ring) => {
+                const bbox = bboxOfRing(ring);
+                const a = Math.abs(ringArea(ring));
+                return { ring, bbox, w: Number.isFinite(a) && a > 0 ? a : 1 };
+              });
+              const totalW = meta.reduce((s, m) => s + m.w, 0) || 1;
+              const c = centroidRef.current[boroKey] || NYC_CENTER;
+              const n = Math.max(70, Math.min(180, Math.floor(st.countries[boroKey].pop / 25_000)));
+              const list: any[] = [];
+
+              for (let i = 0; i < n; i++) {
+                let ll: [number, number] | null = null;
+                if (meta.length) {
+                  let r = Math.random() * totalW;
+                  let pick = meta[0];
+                  for (const m of meta) { r -= m.w; if (r <= 0) { pick = m; break; } }
+                  ll = sampleInRing(pick.ring, pick.bbox, 18);
+                }
+                if (!ll) {
+                  // fallback: jitter around centroid (only if polygon sampling failed)
+                  const jitterLon = (Math.random() - 0.5) * 0.02;
+                  const jitterLat = (Math.random() - 0.5) * 0.02;
+                  ll = [c[0] + jitterLon, c[1] + jitterLat];
+                }
+                const feature = { type: 'Feature', properties: { boro: boroName, name: '' }, geometry: { type: 'Point', coordinates: ll } };
+                list.push(feature);
+                pts.push(feature);
+              }
+              byBoro[boroKey] = list;
+            }
+
+            hoodNodesRef.current = pts;
+            hoodNodesByBoroRef.current = byBoro;
+            policyDotsRef.current = pts.map((f, idx) => ({ id: idx + 1, ll: f.geometry.coordinates as [number, number], damp: 0 }));
+
+            // Hospitals from bundled asset; allocate capacity by beds within each borough.
             const capPerPerson = (st.params.hospCapacityPerK / 1000);
             const grouped: Record<string, any[]> = {};
-            for (const h of live) { const k = String(h.boroKey); if (!grouped[k]) grouped[k] = []; grouped[k].push(h); }
+            const assetHospitals = (HOSPITALS as any[]).filter(h => h && h.boroKey && Array.isArray(h.ll) && h.ll.length === 2);
+            for (const h of assetHospitals) {
+              const key = String(h.boroKey);
+              if (!grouped[key]) grouped[key] = [];
+              grouped[key].push(h);
+            }
+
             const hospitals: Array<{ id: number; boroKey: string; name: string; ll: [number, number]; capacity: number; beds?: number }> = [];
             for (const boroKey of Object.keys(st.countries)) {
               const totalCapBoro = capPerPerson * st.countries[boroKey].pop;
-              const list = grouped[boroKey] || [];
-              const total = list.length || 1;
-              for (const h of list) {
-                const capacity = totalCapBoro / total;
-                hospitals.push({ id: idCounterRef.current++, boroKey, name: String(h.name), ll: h.ll as [number, number], capacity });
+              const list = grouped[boroKey];
+              if (list && list.length) {
+                const totalBeds = list.reduce((s, h: any) => s + (Number(h.beds) || 1), 0) || list.length;
+                for (const h of list) {
+                  const weight = (Number(h.beds) || 1) / totalBeds;
+                  const capacity = totalCapBoro * weight;
+                  hospitals.push({ id: idCounterRef.current++, boroKey, name: String(h.name), ll: h.ll as [number, number], capacity, beds: Number(h.beds) || undefined });
+                }
+              } else {
+                // Fallback: place a few synthetic facilities using local neighborhood points/centroids
+                const boroName = nameMapRef.current[boroKey] || boroKey;
+                const nodes = byBoro[boroKey] || [];
+                const count = Math.max(2, Math.min(5, Math.floor((st.countries[boroKey].pop / 400_000))));
+                for (let i=0;i<count;i++) {
+                  let ll = centroidRef.current[boroKey] || NYC_CENTER;
+                  if (nodes.length) {
+                    const pick = nodes[(i * 7) % nodes.length];
+                    const coords = pick?.geometry?.coordinates;
+                    if (Array.isArray(coords) && coords.length >= 2) ll = coords as [number, number];
+                  }
+                  const capacity = totalCapBoro / count;
+                  hospitals.push({ id: idCounterRef.current++, boroKey, name: `${boroName} Hospital ${i+1}`, ll, capacity });
+                }
               }
             }
-            if (hospitals.length) hospitalNodesRef.current = hospitals;
-          }
+            hospitalNodesRef.current = hospitals;
+          } catch {}
         } catch {}
-      })();
+      }).catch(() => {});
+
+      // Neighborhood points + hospitals are derived from borough geometry + bundled data (local),
+      // so we don't rely on remote GeoJSONs or NYC Open Data fetches (404/CORS noise).
 
       // Thematic fill (red) as overlay on boroughs (opacity maps to infections per capita)
       map.addLayer({
@@ -493,18 +450,18 @@ export function NycMap() {
         type: 'fill',
         source: 'boroughs',
         paint: {
-          'fill-color': '#ff2d2d',
+          'fill-color': '#8b0000',
           'fill-opacity': [
-            'interpolate', ['linear'],
-            // iRate = I / pop; show subtle signal even at very low prevalence
+            'interpolate', ['exponential', 1.6],
+            // iRate = I / pop; keep low prevalence subtle to avoid "everything is red" confusion
             ['coalesce', ['feature-state', 'iRate'], 0],
             0.0, 0.0,
-            0.000001, 0.08,
-            0.000005, 0.18,
-            0.00001, 0.26,
-            0.00005, 0.42,
-            0.0002, 0.60,
-            0.001, 0.82
+            0.00001, 0.04,
+            0.00005, 0.08,
+            0.0002, 0.14,
+            0.001, 0.28,
+            0.003, 0.45,
+            0.01, 0.72
           ],
         }
       });
@@ -513,7 +470,7 @@ export function NycMap() {
         type: 'line',
         source: 'boroughs',
         paint: {
-          'line-color': '#2a3342',
+          'line-color': '#1a1a1a',
           'line-width': 1.5,
         }
       });
@@ -522,7 +479,7 @@ export function NycMap() {
         type: 'line',
         source: 'boroughs',
         paint: {
-          'line-color': '#10b981',
+          'line-color': '#33ff66',
           'line-width': 3,
         },
         filter: ['==', ['get', 'BoroName'], ''],
@@ -591,13 +548,21 @@ export function NycMap() {
             const st = useGameStore.getState();
             const c = st.countries[key];
             if (c) {
-              const per100k = (c.I / c.pop) * 100_000;
-              const html = `<div style="font: 12px system-ui;">
-                <div style="font-weight:600; margin-bottom:2px;">${c.name}</div>
-                <div>I: ${c.I.toFixed(0)} <span style="color:#94a3b8">(${per100k.toFixed(1)} /100k)</span></div>
-                <div style="color:#94a3b8">Policy: ${c.policy}</div>
-              </div>`;
-              popup.setLngLat(ev.lngLat).setHTML(html).addTo(map);
+              // Keep hover UI low-noise: show the MapLibre popup only when the user is explicitly
+              // requesting details (Shift). Otherwise, selection-on-click + Intel panel is the UX.
+              const wantsPopup = Boolean(ev?.originalEvent?.shiftKey);
+              if (wantsPopup) {
+                const per100k = (c.I / c.pop) * 100_000;
+                const html = `<div style="font: 12px system-ui;">
+                  <div style="font-weight:600; margin-bottom:2px;">${c.name}</div>
+                  <div>I: ${c.I.toFixed(0)} <span style="color:#94a3b8">(${per100k.toFixed(1)} /100k)</span></div>
+                  <div style="color:#94a3b8">Policy: ${c.policy}</div>
+                  <div style="color:#94a3b8; margin-top:4px;">Tip: click to select</div>
+                </div>`;
+                popup.setLngLat(ev.lngLat).setHTML(html).addTo(map);
+              } else {
+                popup.remove();
+              }
             }
           }
         } else {
@@ -617,9 +582,23 @@ export function NycMap() {
           varying vec2 uv;
           void main() {
             vec4 color = texture2D(texture, uv);
+            // 1. CRT vignette — hard edges like a curved phosphor display
             float d = distance(uv, vec2(0.5));
-            float vig = smoothstep(0.5, 0.95, d);
-            color.rgb *= (1.0 - 0.18 * vig);
+            float vig = smoothstep(0.3, 0.80, d);
+            color.rgb *= (1.0 - 0.45 * vig);
+            // 2. Heavy desaturation — surveillance feed
+            float gray = dot(color.rgb, vec3(0.299, 0.587, 0.114));
+            color.rgb = mix(color.rgb, vec3(gray), 0.4);
+            // 3. Green phosphor tint — P1 monitor aesthetic
+            color.r *= 0.75;
+            color.g *= 1.15;
+            color.b *= 0.70;
+            // 4. Contrast crush — deep blacks, bright greens
+            color.rgb = (color.rgb - 0.5) * 1.25 + 0.5;
+            color.rgb = clamp(color.rgb, 0.0, 1.0);
+            // 5. Faint green overlay
+            color.rgb += vec3(-0.01, 0.02, -0.01);
+            color.rgb = clamp(color.rgb, 0.0, 1.0);
             gl_FragColor = color;
           }
         `;
@@ -629,7 +608,7 @@ export function NycMap() {
 
       // Bubble spawning + lifecycle via deck.gl
       const colorOf = (type: 'dna'|'ops'|'cure'): [number, number, number, number] =>
-        type === 'cure' ? [96, 165, 250, 220] : type === 'ops' ? [52, 211, 153, 220] : [255, 105, 97, 220];
+        type === 'cure' ? [80, 200, 180, 220] : type === 'ops' ? [40, 180, 100, 220] : [220, 50, 50, 220];
 
       let last = performance.now();
       let elapsedSinceSpawn = 0;
@@ -872,7 +851,7 @@ export function NycMap() {
                 const pick = hoodList[Math.floor(Math.random() * hoodList.length)];
                 const coords = pick?.geometry?.coordinates;
                 if (!Array.isArray(coords) || coords.length < 2) continue;
-                const baseA = 50 + Math.floor(norm * 140);
+                const baseA = 28 + Math.floor(norm * 110);
                 const baseR = 6 + Math.floor(norm * 24);
                 speckles.push({ ll: coords as [number, number], alpha: baseA, r: baseR });
               }
@@ -882,7 +861,7 @@ export function NycMap() {
               for (let i=0; i<dustCount; i++) {
                 const jitterLon = (Math.random() - 0.5) * 0.01; // ~small
                 const jitterLat = (Math.random() - 0.5) * 0.01;
-                const a = 15 + Math.floor(norm * 50);
+                const a = 10 + Math.floor(norm * 35);
                 const r = 3 + Math.floor(norm * 5);
                 dust.push({ ll: [center[0] + jitterLon, center[1] + jitterLat] as [number, number], alpha: a, r });
               }
@@ -905,7 +884,7 @@ export function NycMap() {
             id: 'infection-speckles',
             data: speckles,
             getPosition: (d: any) => d.ll,
-            getFillColor: (d: any) => [255, 66, 66, d.alpha],
+            getFillColor: (d: any) => [180, 20, 20, d.alpha],
             getRadius: (d: any) => d.r,
             radiusUnits: 'pixels',
             stroked: false,
@@ -922,7 +901,7 @@ export function NycMap() {
             id: 'atmo-dust',
             data: dust,
             getPosition: (d: any) => d.ll,
-            getFillColor: (d: any) => [255, 180, 120, d.alpha],
+            getFillColor: (d: any) => [160, 80, 40, d.alpha],
             getRadius: (d: any) => d.r,
             radiusUnits: 'pixels',
             stroked: false,
@@ -938,7 +917,7 @@ export function NycMap() {
             id: 'death-mask',
             data: deaths,
             getPosition: (d: any) => d.ll,
-            getFillColor: (d: any) => [30, 30, 30, d.alpha],
+            getFillColor: (d: any) => [15, 22, 15, d.alpha],
             getRadius: (d: any) => d.r,
             radiusUnits: 'pixels',
             stroked: false,
@@ -1089,9 +1068,16 @@ export function NycMap() {
 
     // Fallback to raster if vector style fails to load
     if (typeof style === 'string') {
+      let didFallback = false;
       map.on('error', (ev) => {
+        if (didFallback) return;
         const msg = String((ev as any)?.error?.message ?? '');
-        if (msg && /style|Unauthorized|403|Failed/i.test(msg)) {
+        // NOTE: MapLibre emits "error" for many things (tile load, sprite, etc). Switching
+        // the whole style on any transient failure can make the map "disappear" mid-zoom.
+        // Only fall back when the *style JSON itself* fails to load.
+        const isStyleJson = msg.includes('style.json');
+        if (isStyleJson && /(Unauthorized|403|Failed|NetworkError|Load failed)/i.test(msg)) {
+          didFallback = true;
           try { map.setStyle(fallback as any); } catch {}
         }
       });
@@ -1137,12 +1123,25 @@ export function NycMap() {
     }
 
     return () => {
-      if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; }
-      if (storeRef.current) storeRef.current();
       try { if (animRef.current) cancelAnimationFrame(animRef.current); } catch {}
+      if (storeRef.current) storeRef.current();
       try { deckRef.current?.finalize(); deckRef.current = null; } catch {}
+      try {
+        const m = mapRef.current;
+        if (m) {
+          const c = m.getCenter();
+          cameraStateRef.current = {
+            center: [c.lng, c.lat],
+            zoom: m.getZoom(),
+            bearing: m.getBearing(),
+            pitch: m.getPitch(),
+          };
+          m.remove();
+          mapRef.current = null;
+        }
+      } catch {}
     };
-  }, []);
+  }, [theme]);
 
   return <div ref={ref} className="nyc-map" aria-label="NYC map" />;
 }

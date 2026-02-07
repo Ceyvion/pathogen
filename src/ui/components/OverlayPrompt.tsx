@@ -13,7 +13,15 @@ export function OverlayPrompt() {
     <div className="overlay-prompt" style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', pointerEvents: 'none' }}>
       <div className="panel glass" style={{ pointerEvents: 'auto', padding: 12 }}>
         <div style={{ fontWeight: 700, marginBottom: 6 }}>{title}</div>
-        <div className="muted">{body}</div>
+        <div className="muted" style={{ display: 'grid', gap: 6 }}>
+          <div>{body}</div>
+          <div>
+            Tip: start at 1× speed. If it feels overwhelming, set Pacing to <strong>Slow</strong> in the top bar.
+          </div>
+          <div>
+            Intel (stats) is the gauge icon, upgrades are in the rocket icon.
+          </div>
+        </div>
       </div>
     </div>
   );

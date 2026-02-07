@@ -18,8 +18,8 @@ export function makeFlowsLayer(opts: { data: Flow[]; t?: number }) {
     getSourcePosition: (d) => d.source,
     getTargetPosition: (d) => d.target,
     getWidth: (d) => 1 + Math.min(6, d.daily / 30000) * (0.7 + 0.3 * pulse),
-    getSourceColor: (d) => [255 * Math.min(1, d.iPrev * 40), 64, 64, alpha],
-    getTargetColor: (d) => [255 * Math.min(1, d.iPrev * 40), 64, 64, alpha],
+    getSourceColor: (d) => [200 * Math.min(1, d.iPrev * 40), 40, 30, alpha],
+    getTargetColor: (d) => [200 * Math.min(1, d.iPrev * 40), 40, 30, alpha],
     greatCircle: true,
     pickable: false,
     parameters: {
@@ -59,7 +59,7 @@ export function makeFlowSparksLayer(opts: { data: Flow[]; t: number }) {
     radiusUnits: 'pixels',
     stroked: false,
     pickable: false,
-    getFillColor: (d: any) => [255 * Math.min(1, d.iPrev * 40 + 0.2), 100, 80, d.alpha],
+    getFillColor: (d: any) => [200 * Math.min(1, d.iPrev * 40 + 0.2), 60, 40, d.alpha],
     parameters: {
       blend: true,
       blendFunc: [GL.SRC_ALPHA, GL.ONE, GL.ONE, GL.ONE_MINUS_SRC_ALPHA],
@@ -79,7 +79,7 @@ export function makeBridgePathsLayer(opts: { data: BridgeFlow[] }) {
     widthMinPixels: 1,
     widthMaxPixels: 8,
     getWidth: (d) => 1 + Math.min(6, d.daily / 30000),
-    getColor: (d) => [255 * Math.min(1, d.iPrev * 40), 84, 84, 180],
+    getColor: (d) => [200 * Math.min(1, d.iPrev * 40), 50, 40, 180],
     pickable: false,
     parameters: { depthTest: false } as any,
   });
@@ -130,7 +130,7 @@ export function makeBridgeSparksLayer(opts: { data: BridgeFlow[]; t: number }) {
     radiusUnits: 'pixels',
     stroked: false,
     pickable: false,
-    getFillColor: (d: any) => [255 * Math.min(1, d.iPrev * 40 + 0.2), 100, 80, d.alpha],
+    getFillColor: (d: any) => [200 * Math.min(1, d.iPrev * 40 + 0.2), 60, 40, d.alpha],
     parameters: {
       depthTest: false,
       blend: true,

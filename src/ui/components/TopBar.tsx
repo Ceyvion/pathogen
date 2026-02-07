@@ -10,7 +10,7 @@ export function TopBar() {
   const mode = useGameStore((s) => s.mode);
   const cure = useGameStore((s) => s.cureProgress);
   const actions = useGameStore((s) => s.actions);
-  const pacing = useGameStore((s) => (s as any).pacing as 'slow'|'normal'|'fast');
+  const pacing = useGameStore((s) => s.pacing);
   const toggleStats = useUiStore((s) => s.toggleStats);
   const toggleUpgrades = useUiStore((s) => s.toggleUpgrades);
   const toTitle = useUiStore((s) => s.toTitle);

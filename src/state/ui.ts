@@ -4,6 +4,7 @@ import type { GameMode, GeneId, Country, PathogenType } from './types';
 
 type UiState = {
   scene: 'boot' | 'title' | 'setup' | 'game';
+  theme: 'dark' | 'light';
   showStats: boolean;
   showUpgrades: boolean;
   mapOverlays: { hospitals: boolean; flows: boolean; bubbles: boolean; policy: boolean };
@@ -17,6 +18,8 @@ type UiState = {
   toggleOverlay: (k: keyof UiState['mapOverlays']) => void;
   setRouteWeight: (id: string, w: number) => void;
   resetRouteWeights: () => void;
+  toggleTheme: () => void;
+  setTheme: (t: UiState['theme']) => void;
   toTitle: () => void;
   toGame: () => void;
   startMode: (m: GameMode) => void;
@@ -51,9 +54,25 @@ type UiState = {
 
 const initialCinematic = (() => { try { return localStorage.getItem('cinematicV1') !== '0'; } catch { return true; } })();
 const initialPreset = (() => { try { return (localStorage.getItem('presetV1') as any) || 'default'; } catch { return 'default'; } })();
+const initialTheme = (() => {
+  try {
+    const saved = localStorage.getItem('theme') as UiState['theme'] | null;
+    if (saved === 'dark' || saved === 'light') return saved;
+    // Respect system preference on first run.
+    const prefersLight = typeof window !== 'undefined'
+      && typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-color-scheme: light)').matches;
+    return prefersLight ? 'light' : 'dark';
+  } catch {
+    return 'dark';
+  }
+})() as UiState['theme'];
+try { if (typeof document !== 'undefined') document.documentElement.setAttribute('data-preset', initialPreset); } catch {}
+try { if (typeof document !== 'undefined') document.documentElement.setAttribute('data-theme', initialTheme); } catch {}
 
 export const useUiStore = create<UiState>((set) => ({
   scene: 'boot',
+  theme: initialTheme,
   showStats: true,
   showUpgrades: false,
   cinematic: initialCinematic,
@@ -71,6 +90,17 @@ export const useUiStore = create<UiState>((set) => ({
     return { routeWeights: next } as any;
   }),
   resetRouteWeights: () => set(() => { try { localStorage.removeItem('routeWeightsV1'); } catch {}; return { routeWeights: {} } as any; }),
+  setTheme: (t) => set(() => {
+    try { if (typeof document !== 'undefined') document.documentElement.setAttribute('data-theme', t); } catch {}
+    try { localStorage.setItem('theme', t); } catch {}
+    return { theme: t } as any;
+  }),
+  toggleTheme: () => set((s) => {
+    const next = s.theme === 'light' ? 'dark' : 'light';
+    try { if (typeof document !== 'undefined') document.documentElement.setAttribute('data-theme', next); } catch {}
+    try { localStorage.setItem('theme', next); } catch {}
+    return { theme: next } as any;
+  }),
   toTitle: () => set(() => ({ scene: 'title', pendingMode: null, pendingStoryId: undefined })),
   toGame: () => set(() => ({ scene: 'game' })),
   startMode: (m) => set(() => ({ scene: 'setup', pendingMode: m })),

@@ -1,5 +1,20 @@
 # TODO
 
+## Task: Slow Day Progression + Improve First-Run HUD Clarity (2026-02-07)
+
+## Plan
+
+- [x] Find the in-game clock constants (`msPerDay`) and how day progression is displayed.
+- [x] Slow default day pacing and retune pacing presets (slow/normal/fast).
+- [x] Add first-run onboarding hints (overlay copy + one-time toasts) so the HUD reads without hovering tooltips.
+
+## Verification
+
+- [ ] Manual: start a new game, pick a borough, watch Day counter pacing at 1× for ~30s (should feel readable).
+- [ ] Manual: confirm the onboarding toast shows only once (reload and start again).
+- [x] Automated: `pnpm test --run`.
+- [x] Automated: `pnpm build`.
+
 ## Task: Research Spawn + Ticker Best Practices (Web)
 
 ## Plan
@@ -92,3 +107,63 @@ When starting a new game, the simulation advances immediately and can generate i
 
 - Confirmed Plague Inc. differentiates types via unique mechanics: fungus uses spore-burst/eruption/hardening to actively reseed countries, bacteria gets resilience that boosts survivability across environments, virus increases random mutation and devolution pressure, and bio-weapon has passive lethality growth with abilities to reset or slow it.
 - Evidence supports levers around detectability vs transmission and asymptomatic spread as a meaningful gameplay axis.
+
+---
+
+## Task: Fix Theme/Map Sync + Banked Tray UX (2026-02-06)
+
+### Plan
+
+- [x] Remove fragile remote neighborhood GeoJSON + live NYC Open Data hospital fetches (404/CORS noise).
+- [x] Generate synthetic "neighborhood" points from borough polygons for pickups/speckles/policy heat.
+- [x] Prevent MapLibre style fallback from triggering on transient tile errors (map can disappear mid-zoom).
+- [x] Sync MapTiler basemap to UI theme even when `VITE_MAP_STYLE` is set to a `*-dark` style.
+- [x] Fix banked pickup tray popup: make it less intrusive (dock bottom-right) and increase TTL.
+
+### Verification
+
+- [x] Manual (Playwright): no 404/CORS console errors on game start; zoom does not blank the map.
+- [x] Manual (Playwright): theme toggle flips MapTiler sprite between `dataviz` and `dataviz-dark`.
+- [x] `pnpm exec tsc --noEmit` passes.
+- [x] `pnpm test --run` passes.
+
+---
+
+## Task: Fix HUD Clickability + Overlay Polish (2026-02-06)
+
+### Problem Statement
+
+- When the Lab drawer is open, the full-screen overlay can intercept pointer events, making the command bar (pause/speed/pacing/theme) hard or impossible to click.
+- The banked pickup tray can overlap MapLibre controls (zoom/attribution) on some viewports.
+- Theme toggle and basemap style should never desync (light UI must not show a dark basemap unless explicitly requested).
+- Overlay UI should feel intentional (not like debug buttons sitting on top of the ticker/map).
+
+### Plan
+
+- [ ] Repro the click-interception issue with the Lab drawer open (Playwright + manual).
+- [ ] Adjust drawer overlay layering so command bar stays clickable while the drawer remains modal for the map.
+- [ ] Reposition/tune the banked pickup tray so it never overlaps MapLibre controls.
+- [ ] Make basemap style selection depend on `ui.theme` directly (not DOM attribute timing).
+- [ ] Light aesthetic pass on Setup + overlay dock (spacing, contrast, glass styling).
+
+### Verification
+
+- [ ] Automated (Playwright): open Lab drawer, click command bar buttons successfully, zoom in/out, toggle theme; no console/page errors.
+- [ ] Manual: verify tray does not block zoom controls or ticker on narrow width.
+- [ ] `pnpm exec tsc --noEmit` passes.
+- [ ] `pnpm test --run` passes.
+
+---
+
+## Task: Install TrackWeight (2026-02-07)
+
+### Plan
+
+- [ ] Clone `https://github.com/KrishKrosh/TrackWeight.git` into `external/TrackWeight/`.
+- [ ] Follow repo README to install dependencies.
+- [ ] Run the repo's recommended smoke check (tests/build/dev start).
+
+### Verification
+
+- [ ] Install step completes without errors.
+- [ ] At least one runnable command succeeds (tests/build/dev start), per README.

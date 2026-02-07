@@ -1,4 +1,5 @@
 import type { Country, CountryID, PathogenType, WorldState } from '../state/types';
+import { HOSP_RESPONSE_TIERS } from '../sim/hospResponse';
 
 type Loc = { name: string; boro: CountryID };
 
@@ -94,7 +95,14 @@ function computeMetrics(st: WorldState): Metrics {
     if (v >= topPer100k) { topPer100k = v; top = c; topId = c.id as any; }
   }
 
-  const capPerPerson = (st.params.hospCapacityPerK / 1000);
+  let hospCapacityMulUp = 1;
+  for (const u of Object.values(st.upgrades || {})) {
+    if (!u.purchased) continue;
+    const e: any = u.effects;
+    if (typeof e.hospCapacityMul === 'number') hospCapacityMulUp *= e.hospCapacityMul;
+  }
+  const respCapMul = HOSP_RESPONSE_TIERS[st.hospResponseTier]?.capMul ?? 1;
+  const capPerPerson = (st.params.hospCapacityPerK / 1000) * hospCapacityMulUp * respCapMul;
   let maxHospLoad = 0;
   for (const c of vals) {
     const cap = capPerPerson * Math.max(1, c.pop);
@@ -389,6 +397,24 @@ const CORDON = [
   "A helicopter circles {topBoro}. That's the whole update.",
 ];
 
+const TREATMENT = [
+  "Field hospitals rising in {topBoro}. The parking lot is now a ward.",
+  "Community health workers deployed across {topBoro}. Knock knock. Thermometer check.",
+  "{topBoro} activates experimental antiviral protocol. Early results: cautiously encouraging.",
+  "Mobile ICU fleet spotted circling {topBoro}. Six-hour loops. No rest.",
+  "Sewage surveillance in {topBoro} detects spike 5 days before clinical data confirms it.",
+  "Emergency triage expansion in {topBoro}: hallway beds, repurposed lobbies, 12-hour shifts.",
+  "Monoclonal antibody shipment arrives at {topBoro}. Armed escort. Refrigerated truck. Political allocation.",
+  "{topBoro} hospitals rotating antibiotic classes weekly. The pathogen adapts; so do they.",
+  "Ferry medevac running double shifts to Staten Island. The Verrazzano is a lifeline tonight.",
+  "Mutual aid pharmacy network in Brooklyn pooling stock. No price gouging. Not tonight.",
+  "Corporate wellness mandate in Manhattan: daily screenings in every tower above 40 floors.",
+  "Bilingual health navigators deployed in Queens. 40 languages. Zero questions about papers.",
+  "{topBoro} palliative care teams activated. Chaplains on speed-dial. The hardest conversation.",
+  "Rapid genomic sequencing hub in {topBoro}: 48-hour variant ID. The pathogen has a name now.",
+  "Spore decontamination crews in hazmat gear scrubbing HVAC systems across {topBoro}.",
+];
+
 export function maybeGenerateWorldEvent(st: WorldState, rng: () => number = Math.random): string | null {
   const m = computeMetrics(st);
   const ctx = makeCtx(st, m, rng);
@@ -422,6 +448,8 @@ export function maybeGenerateWorldEvent(st: WorldState, rng: () => number = Math
     tpl = pickFromBag('bioVol', BIO_VOL, rng);
   } else if (pickTypeSpecific) {
     tpl = pickFromBag(`type:${st.pathogenType}`, TYPE_SPECIFIC[st.pathogenType], rng);
+  } else if (m.maxHospLoad >= 0.7 && rng() < 0.22) {
+    tpl = pickFromBag('treatment', TREATMENT, rng);
   } else if (m.maxHospLoad >= 1.0 && rng() < 0.45) {
     tpl = pickFromBag('crisis', CRISIS, rng);
   } else if (st.cureProgress >= 35 && rng() < 0.25) {

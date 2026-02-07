@@ -19,6 +19,7 @@ import { CommandBar } from './hud/CommandBar';
 import { EventToasts } from './components/EventToasts';
 import { PickupTray } from './components/PickupTray';
 import { OnboardingToasts } from './components/OnboardingToasts';
+import { HospitalModal } from './components/HospitalModal';
 
 export function Hud() {
   const showStats = useUiStore((s) => s.showStats);
@@ -40,6 +41,7 @@ export function Hud() {
         <PickupTray />
         {showStats && <IntelPanel />}
         <RightLabDrawer />
+        <HospitalModal />
         <BottomTicker />
         <OverlayChips />
         <ISLPanel />

@@ -4,6 +4,10 @@ export type GameMode = 'architect' | 'controller';
 
 export type PathogenType = 'virus' | 'bacteria' | 'fungus' | 'bioweapon';
 
+// Citywide emergency posture for hospital systems. This is a simple "story beat"
+// style lever (peaks/valleys) that activates when demand exceeds capacity.
+export type HospResponseTier = 0 | 1 | 2 | 3;
+
 export interface Country {
   id: CountryID;
   name: string;
@@ -14,12 +18,69 @@ export interface Country {
 
 export type Branch = 'transmission' | 'symptoms' | 'abilities';
 
+// Upgrade effect keys are intentionally strict so typos in `effects: { ... }` are
+// caught by TypeScript at author time. When adding new effects, wire them into
+// the simulation tick and extend this list.
+export const UPGRADE_EFFECT_KEYS = [
+  // Core SEIR params
+  'betaMul',
+  'sigmaMul',
+  'gammaRecMul',
+  'muMul',
+  'importationMul',
+
+  // Hospital + cure dynamics
+  'hospRateMul',
+  'dischargeMul',
+  'hospCapacityMul',
+  'mortalityHospMul',
+  'cureRateMul',
+  'cureAddPerDay',
+
+  // Economy/agency/metasystems
+  'policyResistMul',
+  'dnaRateAdd',
+  'dnaPerDeathAdd',
+  'opsPerDayAdd',
+
+  // Mobility / containment
+  'travelReductionMul',
+  'quarantineEffMul',
+
+  // Detection / symptom mechanics
+  'detectionDelayAdd',
+  'symFracMul',
+  'symContactMul',
+  'severityMobilityMul',
+  'asymptomaticSpreadMul',
+
+  // Disease shape / persistence
+  'exposedDurationMul',
+  'reinfectionRate',
+
+  // Pathogen-type subsystems
+  'mutationDebtDecayAdd',
+  'mutationChanceMul',
+  'resistanceDecayAdd',
+  'resistancePressureMul',
+  'fungusBurstChanceMul',
+  'fungusBurstDurationAdd',
+  'bioweaponVolatilityRateMul',
+
+  // Bioweapon containment tool config
+  'cordonDaysAdd',
+  'cordonCostDelta',
+] as const;
+
+export type UpgradeEffectKey = (typeof UPGRADE_EFFECT_KEYS)[number];
+export type UpgradeEffects = Partial<Record<UpgradeEffectKey, number>>;
+
 export interface Upgrade {
   id: string;
   name: string;
   branch: Branch;
   cost: number;
-  effects: Record<string, number>;
+  effects: UpgradeEffects;
   prereqs?: string[];
   purchased?: boolean;
   desc?: string;
@@ -58,6 +119,46 @@ export interface Params {
   earlyPointBoostMul?: number; // multiplier for early accrual
 }
 
+export interface AiDirectorKnobs {
+  // Multipliers that are applied on top of base params. These are designed to be
+  // subtle, reversible, and clamped.
+  variantTransMultMul: number;
+  sigmaMul: number;
+  muBaseMul: number;
+}
+
+export interface AiDirectorDecision {
+  version: 1;
+  note: string;
+  intent: 'increase' | 'decrease' | 'hold';
+  // Per-decision multipliers (close to 1.0). The client multiplies these into
+  // the running knobs and clamps to hard bounds.
+  knobs: Partial<AiDirectorKnobs>;
+}
+
+export interface AiDirectorDaySnapshot {
+  dayIndex: number;
+  totalPop: number;
+  totalI: number;
+  totalH: number;
+  prevalence: number; // I / pop
+  per100k: number;
+  hospLoad: number; // avg load ratio vs capacity proxy
+  cureProgress: number; // 0..100
+  intensity: number; // 0..1
+}
+
+export interface AiDirectorState {
+  enabled: boolean;
+  pending: boolean;
+  error: string | null;
+  lastEvalDay: number | null; // dayIndex of the most recent applied decision
+  lastRequestAtMs: number | null;
+  dailyUsage: { dateKey: string; count: number };
+  history: AiDirectorDaySnapshot[]; // capped ring buffer
+  knobs: AiDirectorKnobs;
+}
+
 export interface WorldState {
   t: number; // ms elapsed
   day: number; // in-game days elapsed (float)
@@ -89,6 +190,8 @@ export interface WorldState {
   campaignId?: string;
   awaitingPatientZero?: boolean;
   patientZeroSeedAmount?: number;
+  aiDirector?: AiDirectorState;
+  hospResponseTier: HospResponseTier;
 }
 
 export interface TravelEdge { from: CountryID; to: CountryID; daily: number; }

@@ -15,6 +15,7 @@ import { makeBubblesLayer } from './layers/bubbles';
 import { makeHospitalsLayer } from './layers/hospitals';
 import { makeFlowsLayer, makeFlowSparksLayer, makeBridgePathsLayer, makeBridgeSparksLayer } from './layers/flows';
 import { routesFor } from './bridges';
+import { HOSP_RESPONSE_TIERS } from '../sim/hospResponse';
 
 const NYC_CENTER: [number, number] = [-74.006, 40.7128];
 const NYC_BOUNDS: [[number, number], [number, number]] = [
@@ -85,7 +86,7 @@ export function NycMap() {
   const hoodNodesByBoroRef = useRef<Record<string, any[]>>({});
   const animRef = useRef<number>(0);
   const idCounterRef = useRef<number>(1);
-  const hospitalNodesRef = useRef<Array<{ id: number; boroKey: string; name: string; ll: [number, number]; capacity: number }>>([]);
+  const hospitalNodesRef = useRef<Array<{ id: number; boroKey: string; name: string; ll: [number, number]; capacity: number; beds?: number }>>([]);
   const policyDotsRef = useRef<Array<{ id: number; ll: [number, number]; damp: number }>>([]);
   const lastDeckUpdateRef = useRef<number>(0);
   const lastFlowsUpdateRef = useRef<number>(0);
@@ -121,12 +122,16 @@ export function NycMap() {
         maxBounds: NYC_BOUNDS as any,
         renderWorldCopies: false,
         hash: false,
+        // More forgiving click detection helps deck.gl icon interactions feel reliable
+        // on trackpads and touch devices where tiny drags can cancel clicks.
+        clickTolerance: 8,
         // We'll add a compact attribution control ourselves to keep the HUD tidy.
         attributionControl: false,
       });
     mapRef.current = map;
     map.addControl(new NavigationControl({ visualizePitch: true }), 'bottom-right');
-    map.addControl(new AttributionControl({ compact: true }), 'bottom-right');
+    // Keep required attribution visible, but avoid the compact "info" icon UI.
+    map.addControl(new AttributionControl({ compact: false }), 'bottom-right');
     map.addControl(new ScaleControl({ unit: 'imperial' }), 'bottom-left');
     // expose reset view for UI button
     (window as any).resetNYCView = () => {
@@ -615,6 +620,15 @@ export function NycMap() {
       let elapsedSinceBlot = 0;
       let elapsedSinceDust = 0;
 
+      // If the pointer is over a deck.gl pickable object, suppress drag-pan so the icon click wins.
+      let deckHoverSuppressPan = false;
+      const setDeckHoverSuppressPan = (v: boolean) => {
+        if (v === deckHoverSuppressPan) return;
+        deckHoverSuppressPan = v;
+        try { v ? map.dragPan.disable() : map.dragPan.enable(); } catch {}
+        try { (map.getCanvas() as HTMLCanvasElement).style.cursor = v ? 'pointer' : ''; } catch {}
+      };
+
       const MAX_ACTIVE_BUBBLES = 10;
       const SAFE_PAD_PX = 18;
       const OBSTACLE_PAD_PX = 12;
@@ -773,16 +787,34 @@ export function NycMap() {
           }
         }
 
-        // Compute hospital occupancy snapshot per borough
+        // Compute hospital occupancy + capacity snapshot per borough
         const state = useGameStore.getState();
         const perBoroH = Object.fromEntries(Object.keys(state.countries).map(k => [k, state.countries[k].H]));
+        let hospCapacityMulUp = 1;
+        for (const u of Object.values(state.upgrades || {})) {
+          if (!u.purchased) continue;
+          const e: any = u.effects;
+          if (typeof e.hospCapacityMul === 'number') hospCapacityMulUp *= e.hospCapacityMul;
+        }
+        const respCapMul = HOSP_RESPONSE_TIERS[state.hospResponseTier]?.capMul ?? 1;
+        const capPerPerson = (state.params.hospCapacityPerK / 1000) * hospCapacityMulUp * respCapMul;
+
         const hospData = hospitalNodesRef.current.map(h => {
+          const boro = state.countries[h.boroKey];
           const Hboro = perBoroH[h.boroKey] || 0;
+          const N = Math.max(1, boro?.pop || 1);
+          const capBoro = capPerPerson * N;
+
           const sameBoro = hospitalNodesRef.current.filter(x => x.boroKey === h.boroKey);
-          const totalCap = sameBoro.reduce((s, x) => s + (x.capacity || 0), 0) || 1;
-          const weight = (h.capacity || 1) / totalCap;
+          const totalBeds = sameBoro.reduce((s, x) => s + (Number(x.beds) || 0), 0);
+          const totalCapStatic = sameBoro.reduce((s, x) => s + (x.capacity || 0), 0) || 1;
+          const weight = totalBeds > 0
+            ? (Number(h.beds) || 0) / totalBeds
+            : (h.capacity || 1) / totalCapStatic;
+
+          const capacity = capBoro * weight;
           const occupancy = Hboro * weight;
-          return { ...h, occupancy };
+          return { ...h, capacity, occupancy };
         });
 
         // Flows along travel edges (intensity scaled by mobility and infectivity)
@@ -951,6 +983,7 @@ export function NycMap() {
               const load = obj.capacity > 0 ? (obj.occupancy / obj.capacity) : 0;
               const pct = load > 0 && load < 0.001 ? '<0.1' : (load * 100).toFixed(1);
               st.actions.addEvent(`Hospital: ${obj.name} — Load ${pct}%`);
+              useUiStore.getState().setHospitalModalId(obj.name);
             } catch {}
           }
         });
@@ -1037,7 +1070,16 @@ export function NycMap() {
             }
             return null;
           };
-          overlay.setProps({ layers, effects: effectsRef.current, getTooltip });
+          overlay.setProps({
+            layers,
+            effects: effectsRef.current,
+            getTooltip,
+            onHover: (info: any) => {
+              const id = info?.layer?.id;
+              const overPickable = Boolean(info?.object && (id === 'hospitals-layer' || id === 'bubbles-layer'));
+              setDeckHoverSuppressPan(overPickable);
+            },
+          });
           lastDeckUpdateRef.current = now;
         }
 

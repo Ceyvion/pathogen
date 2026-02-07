@@ -23,7 +23,11 @@ export function makeBubblesLayer(opts: {
       return base;
     },
     getFillColor: (d) => colorOf(d.type),
-    onClick: (info: any) => { if (info?.object && onClick) onClick(info.object as Bubble); },
+    onClick: (info: any, ev: any) => {
+      // Prevent MapLibre drag-pan from "stealing" short clicks on bubbles.
+      try { ev?.srcEvent?.preventDefault?.(); ev?.srcEvent?.stopPropagation?.(); } catch {}
+      if (info?.object && onClick) onClick(info.object as Bubble);
+    },
     updateTriggers: { data: data.length, t }
   });
 }

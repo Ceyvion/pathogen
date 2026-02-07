@@ -1,5 +1,99 @@
 # TODO
 
+## Task: Hospital Overload Response + AI Director Guardrails (2026-02-07)
+
+## Plan
+
+- [x] Add citywide `hospResponseTier` + tier logic (`src/sim/hospResponse.ts`) and update it daily in `src/state/store.ts`.
+- [x] Apply response multipliers to effective hospital capacity + discharge in the sim tick.
+- [x] Update hospital UI + map overlay to compute load vs effective capacity; show overflow instead of implying impossible occupancy.
+- [x] Make AI director see hotspot reality: `hospLoad` uses max load (not avg) and includes capacity multipliers; apply a small “director override” on response escalations.
+- [x] Add unit tests for tier transitions and loosen AI-director tests that assumed `events[0]` ordering.
+
+## Verification
+
+- [x] `pnpm check`
+- [x] `pnpm test --run`
+- [x] `pnpm build`
+
+## Task: Investigate Title/Setup Screen Styling (2026-02-07)
+
+## Plan
+
+- [x] Identify the markup/components used for title and setup screens and their associated stylesheets.
+- [x] Catalog any existing background/vignette effects or layout constraints tied to those screens.
+- [x] Determine safe CSS hooks or component locations where a full-screen canvas background effect can be mounted without breaking layout.
+- [x] Summarize findings and propose integration points for the new canvas effect.
+
+## Verification
+
+- [x] Confirm that the summary covers the relevant CSS files, existing visual effects, and recommended integration spots.
+
+## Notes
+
+- Screens: `src/ui/screens/TitleScreen.tsx` and `src/ui/screens/SetupScreen.tsx`
+- Styling: `src/styles/globals.css` (`.title-screen`, `.setup-screen`, plus pseudo-element grid/glow overlays)
+- Global overlays: `src/styles/globals.css` (`.app-root::before/after` scanlines + phosphor burn)
+- Safe mount point for a full-screen effect: render an absolutely-positioned canvas as a first child of `.title-screen`, keep `pointer-events: none`, then layer pseudo elements + the `.title-panel` above via `z-index`.
+
+## Task: Virus-Themed UI/Loading Effects (TSL Morphing Particles) (2026-02-07)
+
+## Plan
+
+- [x] Review `tsl-morphing-particles` (Three.js TSL + WebGPU) and extract a minimal technique we can ship without its demo assets.
+- [x] Add a `VirusMorphingBackdrop` UI component that mounts a full-screen canvas.
+- [x] Implement the WebGPU renderer path (Three `WebGPURenderer` + TSL `SpriteNodeMaterial` morphing instanced particles).
+- [x] Implement a graceful fallback (disable effect if WebGPU init fails / reduced-motion is set).
+- [x] Integrate backdrop into Title + Setup screens (behind panels; no pointer interception).
+- [x] CSS layering: ensure pseudo-elements (grid/glow) sit above the canvas, and the panel sits above everything.
+- [x] Add an attribution comment + note about upstream repo license (no `LICENSE` in repo as of 2026-02-07).
+
+## Verification
+
+- [x] Manual: `pnpm dev` -> Title screen shows subtle virus-like particle morphing in the background.
+- [x] Manual: Setup screen shows the same background; UI remains clickable.
+- [ ] Manual: `prefers-reduced-motion: reduce` disables the effect.
+- [x] `pnpm check`
+- [x] `pnpm test --run`
+- [x] `pnpm build`
+
+
+## Task: AI Evolution Director (OpenRouter) (2026-02-07)
+
+## Plan
+
+- [x] Add AI director types to `src/state/types.ts`.
+- [x] Add director metrics helper `src/sim/aiDirectorMetrics.ts`.
+- [x] Wire into sim tick + save/load + `startNewGame()` in `src/state/store.ts`.
+- [x] Add Setup + TopBar UI toggles.
+- [x] Add Node API proxy server (`server/`) that calls OpenRouter and validates JSON schema.
+- [x] Add Vitest coverage for gating/clamping/error handling.
+
+## Verification
+
+- [x] `pnpm check`
+- [x] `pnpm test --run`
+- [x] `pnpm build`
+
+## Notes
+
+- Add `OPENROUTER_API_KEY` to `.env.local` to enable.
+- Free-model calls are conservative (cooldowns + daily budget).
+
+## Task: Harden Upgrade Effect Typing (Remove `as any`) (2026-02-07)
+
+## Plan
+
+- [x] Define a strict `UpgradeEffects` type (union of allowed effect keys) in `src/state/types.ts`.
+- [x] Update `Upgrade.effects` to use `UpgradeEffects` so unknown keys are a type error.
+- [x] Remove effect-related `as any` casts in `src/state/store.ts` (upgrade definitions + sim aggregation + cordon logic).
+
+## Verification
+
+- [x] `pnpm check`
+- [x] `pnpm test --run`
+- [x] `pnpm build`
+
 ## Task: Slow Day Progression + Improve First-Run HUD Clarity (2026-02-07)
 
 ## Plan
@@ -15,6 +109,31 @@
 - [x] Automated: `pnpm test --run`.
 - [x] Automated: `pnpm build`.
 
+## Task: Make Map Overlay Icons Clickable (Fix Drag-Pan Stealing Clicks) (2026-02-07)
+
+## Plan
+
+- [x] Repro: clicking hospital icons feels like drag-pan activates (grab), preventing selection.
+- [x] Make map clicks more tolerant of small motion (`clickTolerance`).
+- [x] Prevent MapLibre drag-pan from stealing deck.gl icon/bubble clicks (stop propagation + suppress drag-pan on hover).
+
+## Verification
+
+- [ ] Manual: click a hospital icon several times; it should reliably trigger the event/camera behavior without dragging.
+- [ ] Manual: bubbles should still be clickable; dragging empty map should still pan as normal.
+- [x] Automated: `pnpm test --run`.
+- [x] Automated: `pnpm build`.
+
+## Task: Remove Map Attribution "Info" Icon (Keep Credits Visible) (2026-02-07)
+
+## Plan
+
+- [x] Switch MapLibre attribution control from compact (icon) to non-compact (text only).
+
+## Verification
+
+- [ ] Manual: confirm the “i” attribution icon is gone; attribution text remains visible.
+
 ## Task: Research Spawn + Ticker Best Practices (Web)
 
 ## Plan
@@ -22,6 +141,21 @@
 - [ ] Identify primary sources for UI-safe pickup spawning and occlusion/safe-zone handling.
 - [ ] Identify primary sources for game event/news ticker systems (templates, shuffle bag, cooldowns).
 - [ ] Collect recommended simple algorithms (Poisson disk sampling, shuffle bag, weighted random with cooldown).
+
+## Task: Research Plague Inc Popularity Evolution (2015-2021+) (Web) (2026-02-07)
+
+## Plan
+
+- [ ] Collect primary sources for Plague Inc platform milestones (Steam/PC, major updates/DLCs, downloads).
+- [ ] Collect coverage of outbreak-driven popularity spikes (late Ebola period + COVID-19) across mobile + Steam.
+- [ ] Find credible mentions of educational/public-health relevance (WHO/CEPI/academic/press) and charity actions.
+- [ ] Pull streamer/YouTube amplification evidence (credible coverage of streaming/YouTube trends, not anecdotes).
+- [ ] Synthesize: dated timeline + 5-10 fame drivers + 5-10 sources w/ URLs + actionable lessons for our game.
+
+## Verification
+
+- [ ] Timeline includes concrete dates and explicitly calls out spike windows vs baseline periods.
+- [ ] Each key claim is backed by at least one credible source (primary preferred; reputable press acceptable).
 - [ ] Synthesize actionable bullet points with citations/links.
 
 ## Verification
@@ -102,6 +236,24 @@ When starting a new game, the simulation advances immediately and can generate i
 - Plague types:
   - Added explicit subsystem mechanics (virus mutation debt + random drift, bacteria antibiotic resistance, fungus spore bursts, bioweapon volatility).
   - Added type-specific upgrade levers and exposed controller-only bioweapon cordon deployment in the Intel panel.
+
+## Task: Research Plague Inc Fame Drivers (Case Study) (2026-02-07)
+
+## Plan
+
+- [x] Collect sources covering early chart breakout (2012), outbreak-driven spikes (2014 Ebola, 2020 COVID), and long-tail support (updates + Steam/PC).
+- [x] Synthesize actionable product/PR lessons into `tasks/lessons.md`.
+- [x] Record source links for later deep dives.
+
+## Verification
+
+- [x] `tasks/lessons.md` contains actionable bullets plus a short list of source links.
+
+## Review (2026-02-07)
+
+- Captured a Plague Inc fame case study in `tasks/lessons.md` (pitch clarity, early velocity, update/platform long tail, outbreak-related PR posture), with source links for deeper reading.
+
+---
 
 ### Research Review (2026-02-06)
 

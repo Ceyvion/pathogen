@@ -1,8 +1,8 @@
 import React from 'react';
 import { useUiStore } from '../../state/ui';
-import { useGameStore } from '../../state/store';
 import { Biohazard, ShieldCheck, Play, BookOpen } from 'lucide-react';
 import { STORIES } from '../../story/stories';
+import { VirusMorphingBackdrop } from '../components/VirusMorphingBackdrop';
 
 export function TitleScreen() {
   const toSetup = useUiStore((s) => s.toSetup);
@@ -14,6 +14,7 @@ export function TitleScreen() {
 
   return (
     <div className="title-screen">
+      <VirusMorphingBackdrop tone="neutral" />
       <div className="title-panel panel">
         <h1>Pathogen</h1>
         <p className="muted">Choose your side. Control the fate of eight million.</p>

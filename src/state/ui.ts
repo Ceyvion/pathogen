@@ -31,6 +31,8 @@ type UiState = {
   setHudHovering: (v: boolean) => void;
   setHudCompact: (v: boolean) => void;
   setPreset: (p: 'default'|'neo'|'emergency') => void;
+  hospitalModalId: string | null;
+  setHospitalModalId: (id: string | null) => void;
   setup: {
     difficulty: 'casual'|'normal'|'brutal';
     genes: GeneId[];
@@ -40,6 +42,7 @@ type UiState = {
     initialPolicy: Country['policy']; // Controller starts
     startingOps: number; // initial ops points for Controller
     pathogenType: PathogenType;
+    aiDirectorEnabled: boolean;
   };
   setSetup: (s: Partial<{
     difficulty: 'casual'|'normal'|'brutal';
@@ -49,6 +52,7 @@ type UiState = {
     initialPolicy: Country['policy'];
     startingOps: number;
     pathogenType: PathogenType;
+    aiDirectorEnabled: boolean;
   }>) => void;
 };
 
@@ -109,9 +113,11 @@ export const useUiStore = create<UiState>((set) => ({
   setPendingStory: (id) => set(() => ({ pendingStoryId: id })),
   toSetup: (m, storyId) => set(() => ({ scene: 'setup', pendingMode: m, pendingStoryId: storyId })),
   setCinematic: (v) => set(() => { try { localStorage.setItem('cinematicV1', v ? '1' : '0'); } catch {}; return { cinematic: v } as any; }),
-  setup: { difficulty: 'normal', genes: [], seedMode: 'pick', seedAmount: 15000, initialPolicy: 'advisory', startingOps: 8, pathogenType: 'virus' },
+  setup: { difficulty: 'normal', genes: [], seedMode: 'pick', seedAmount: 15000, initialPolicy: 'advisory', startingOps: 8, pathogenType: 'virus', aiDirectorEnabled: false },
   setSetup: (p) => set((s) => ({ setup: { ...s.setup, ...p, genes: p.genes ?? s.setup.genes } })),
   setHudHovering: (v) => set(() => ({ hudHovering: v } as any)),
   setHudCompact: (v) => set(() => ({ hudCompact: v } as any)),
   setPreset: (p) => set(() => { try { localStorage.setItem('presetV1', p); } catch {}; return { preset: p } as any; }),
+  hospitalModalId: null,
+  setHospitalModalId: (id) => set(() => ({ hospitalModalId: id })),
 }));

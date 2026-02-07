@@ -3,6 +3,7 @@ import { useUiStore } from '../../state/ui';
 import { useGameStore } from '../../state/store';
 import type { Country } from '../../state/types';
 import { ArrowLeft, SunMoon } from 'lucide-react';
+import { VirusMorphingBackdrop } from '../components/VirusMorphingBackdrop';
 
 const PATHOGENS = [
   { id: 'virus', name: 'Virus', desc: 'Rapid mutation. Unpredictable. What evolves fast can spiral out of control.' },
@@ -32,11 +33,14 @@ export function SetupScreen() {
   const isStory = Boolean(pendingStoryId);
   const campaignKey = pendingStoryId || (pendingMode === 'architect' ? 'architect_free' : 'controller_free');
   const isArchitect = pendingMode === 'architect';
+  const aiEligible = setup.pathogenType === 'virus';
+  const tone = pendingMode === 'architect' ? 'infected' : pendingMode === 'controller' ? 'sterile' : 'neutral';
 
   const begin = () => {
     if (!pendingMode) return;
     const opts: any = { difficulty: setup.difficulty, genes: setup.genes as any, storyId: pendingStoryId };
     opts.pathogenType = setup.pathogenType;
+    opts.aiDirectorEnabled = setup.aiDirectorEnabled;
     if (pendingMode === 'architect') {
       opts.seedMode = setup.seedMode;
       opts.seedAmount = setup.seedAmount;
@@ -50,6 +54,7 @@ export function SetupScreen() {
 
   return (
     <div className="title-screen setup-screen">
+      <VirusMorphingBackdrop tone={tone} />
       <div className="title-panel panel glass setup-panel">
         <div className="setup-top">
           <button className="btn" onClick={toTitle} title="Back to mode select"><ArrowLeft size={16} /> Back</button>
@@ -89,12 +94,12 @@ export function SetupScreen() {
               <div className="setup-block">
                 <div className="setup-kicker">Pathogen Type</div>
                 <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
-                  {PATHOGENS.map((p) => (
+                {PATHOGENS.map((p) => (
                     <button
                       key={p.id}
                       type="button"
                       className={`chip ${setup.pathogenType === p.id ? 'active' : ''}`}
-                      onClick={() => setSetup({ pathogenType: p.id as any })}
+                      onClick={() => setSetup({ pathogenType: p.id as any, aiDirectorEnabled: p.id === 'virus' ? setup.aiDirectorEnabled : false })}
                       aria-pressed={setup.pathogenType === p.id}
                       title={p.desc}
                     >
@@ -107,6 +112,26 @@ export function SetupScreen() {
                 </div>
               </div>
             )}
+
+            <div className="setup-block">
+              <div className="setup-kicker">AI Evolution Director (beta)</div>
+              <label className="setup-gene" title={aiEligible ? 'Let a free AI model nudge virus behavior periodically.' : 'Virus-only for now.'}>
+                <input
+                  type="checkbox"
+                  disabled={!aiEligible}
+                  checked={aiEligible && setup.aiDirectorEnabled}
+                  onChange={(e) => setSetup({ aiDirectorEnabled: e.target.checked })}
+                />
+                <div>
+                  <div className="setup-gene-name">Enable AI-driven variant drift</div>
+                  <div className="setup-gene-desc">
+                    {aiEligible
+                      ? 'Uses a free OpenRouter model (via local server proxy) to gently adapt virus parameters to pacing + intensity.'
+                      : 'Select Virus to enable.'}
+                  </div>
+                </div>
+              </label>
+            </div>
 
             <div className="setup-block">
               <div className="setup-kicker">How This Run Starts</div>

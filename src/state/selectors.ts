@@ -1,10 +1,12 @@
 import type { GameStore } from './store';
 import type { CountryID } from './types';
+import { HOSP_RESPONSE_TIERS } from '../sim/hospResponse';
 
 export type ISLMetrics = { infectivity: number; severity: number; lethality: number };
 
 function aggregateUpgradeMultipliers(st: GameStore) {
   let betaMulUp = 1, sigmaMulUp = 1, gammaRecMulUp = 1, muMulUp = 1;
+  let hospCapacityMulUp = 1;
   let policyResistMulUp = 1, symFracMulUp = 1, symContactMulUp2 = 1, severityMobilityMulUp = 1;
   for (const u of Object.values(st.upgrades)) {
     if (!u.purchased) continue;
@@ -13,17 +15,21 @@ function aggregateUpgradeMultipliers(st: GameStore) {
     if ((e as any).sigmaMul) sigmaMulUp *= (e as any).sigmaMul;
     if ((e as any).gammaRecMul) gammaRecMulUp *= (e as any).gammaRecMul;
     if ((e as any).muMul) muMulUp *= (e as any).muMul;
+    if ((e as any).hospCapacityMul) hospCapacityMulUp *= (e as any).hospCapacityMul;
     if ((e as any).policyResistMul) policyResistMulUp *= (e as any).policyResistMul;
     if ((e as any).symFracMul) symFracMulUp *= (e as any).symFracMul;
     if ((e as any).symContactMul) symContactMulUp2 *= (e as any).symContactMul;
     if ((e as any).severityMobilityMul) severityMobilityMulUp *= (e as any).severityMobilityMul;
   }
-  return { betaMulUp, sigmaMulUp, gammaRecMulUp, muMulUp, policyResistMulUp, symFracMulUp, symContactMulUp2, severityMobilityMulUp };
+  return { betaMulUp, sigmaMulUp, gammaRecMulUp, muMulUp, hospCapacityMulUp, policyResistMulUp, symFracMulUp, symContactMulUp2, severityMobilityMulUp };
 }
 
 export function selectISL(st: GameStore): ISLMetrics {
   const p = st.params as any;
   const up = aggregateUpgradeMultipliers(st);
+  const aiOn = Boolean(st.aiDirector?.enabled && st.pathogenType === 'virus');
+  const aiVariantMul = aiOn ? st.aiDirector!.knobs.variantTransMultMul : 1;
+  const aiMuMul = aiOn ? st.aiDirector!.knobs.muBaseMul : 1;
   // Seasonality factor (same as sim tick)
   const season = 1 + p.seasonalityAmp * Math.cos(2 * Math.PI * ((st.day - p.seasonalityPhase) / 365));
   const symFracEff = Math.max(0, Math.min(1, p.symFrac * up.symFracMulUp));
@@ -42,15 +48,16 @@ export function selectISL(st: GameStore): ISLMetrics {
     contactAccum += contactMul * N;
   }
   const avgContactMul = totalN > 0 ? (contactAccum / totalN) : 1;
-  const betaEff = p.beta * up.betaMulUp * p.variantTransMult * season * avgContactMul;
+  const betaEff = p.beta * up.betaMulUp * (p.variantTransMult * aiVariantMul) * season * avgContactMul;
   // Normalize infectivity around a nominal range (0..1) relative to baseline beta
   const infectivity = Math.max(0, Math.min(1, betaEff / (p.beta * 1.6)));
 
   // Severity: combine hospitalization strain and symptomatic prevalence
   let strainAccum = 0, symPrevAccum = 0;
+  const respCapMul = HOSP_RESPONSE_TIERS[st.hospResponseTier]?.capMul ?? 1;
   for (const c of Object.values(st.countries)) {
     const N = Math.max(1, c.pop);
-    const capPerPerson = (p.hospCapacityPerK / 1000);
+    const capPerPerson = (p.hospCapacityPerK / 1000) * up.hospCapacityMulUp * respCapMul;
     const cap = capPerPerson * N;
     const strain = cap > 0 ? Math.min(2, Math.max(0, c.H / cap)) : 0; // 0..2, >1 indicates overload
     const symPrev = symFracEff * (c.I / N);
@@ -61,7 +68,7 @@ export function selectISL(st: GameStore): ISLMetrics {
   const severity = Math.max(0, Math.min(1, 0.6 * avgSymPrev + 0.4 * Math.min(1, avgStrain)));
 
   // Lethality: effective mortality under strain relative to a nominal upper bound
-  const muEffBase = p.muBase * up.muMulUp;
+  const muEffBase = p.muBase * up.muMulUp * aiMuMul;
   // approximate average overload amplification as in sim
   const overloadAmp = avgStrain > 1 ? (1 + (avgStrain - 1) * 2) : 1;
   const muEff = muEffBase * overloadAmp;
@@ -78,6 +85,9 @@ export function selectSelectedCountryId(st: GameStore): CountryID | null {
 export function selectReff(st: GameStore): number {
   const up = aggregateUpgradeMultipliers(st);
   const p: any = st.params;
+  const aiOn = Boolean(st.aiDirector?.enabled && st.pathogenType === 'virus');
+  const aiVariantMul = aiOn ? st.aiDirector!.knobs.variantTransMultMul : 1;
+  const aiMuMul = aiOn ? st.aiDirector!.knobs.muBaseMul : 1;
   const season = 1 + p.seasonalityAmp * Math.cos(2 * Math.PI * ((st.day - p.seasonalityPhase) / 365));
   let num = 0, den = 0;
   for (const c of Object.values(st.countries)) {
@@ -87,9 +97,9 @@ export function selectReff(st: GameStore): number {
     const symPrev = Math.max(0, Math.min(1, (p.symFrac * (c.I / N))));
     const symContact = 1 - symPrev * (1 - Math.max(0, Math.min(1, p.symContactMul * up.symContactMulUp2)));
     const contactMul = policyContactMul * symContact;
-    const betaEff = p.beta * up.betaMulUp * p.variantTransMult * season * contactMul;
+    const betaEff = p.beta * up.betaMulUp * (p.variantTransMult * aiVariantMul) * season * contactMul;
     const gammaRec = p.gammaRec * up.gammaRecMulUp;
-    const mu = p.muBase * up.muMulUp;
+    const mu = p.muBase * up.muMulUp * aiMuMul;
     const Seff = Math.max(0, c.S / N);
     const Reff = (betaEff * Seff) / Math.max(1e-6, (gammaRec + mu));
     num += Reff * N; den += N;

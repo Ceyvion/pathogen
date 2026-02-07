@@ -39,6 +39,10 @@ export function makeHospitalsLayer(opts: {
     onHover: (info: any) => {
       try { (info.layer?.context?.deck?.canvas as HTMLCanvasElement).style.cursor = info?.object ? 'pointer' : ''; } catch {}
     },
-    onClick: (info: any) => { if (info?.object && onClick) onClick(info.object as HospitalDot); },
+    onClick: (info: any, ev: any) => {
+      // Prevent MapLibre drag-pan from "stealing" short clicks on icons.
+      try { ev?.srcEvent?.preventDefault?.(); ev?.srcEvent?.stopPropagation?.(); } catch {}
+      if (info?.object && onClick) onClick(info.object as HospitalDot);
+    },
   }) as any;
 }

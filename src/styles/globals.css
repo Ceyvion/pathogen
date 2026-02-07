@@ -105,13 +105,32 @@ body {
   place-items: center;
   color: var(--text);
   background: var(--bg);
+  overflow: hidden;
 }
+.virus-morphing-backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.72;
+  mix-blend-mode: screen;
+}
+[data-theme="light"] .virus-morphing-backdrop {
+  opacity: 0.55;
+  mix-blend-mode: multiply;
+  filter: saturate(1.35) contrast(1.08);
+}
+[data-theme="hc"] .virus-morphing-backdrop { display: none; }
 /* Grid texture — like graph paper on a classified document */
 .title-screen::before {
   content: "";
   position: absolute;
   inset: 0;
   pointer-events: none;
+  z-index: 1;
   opacity: 0.06;
   background:
     repeating-linear-gradient(90deg, var(--text) 0, var(--text) 1px, transparent 1px, transparent 80px),
@@ -123,11 +142,13 @@ body {
   position: absolute;
   inset: 0;
   pointer-events: none;
+  z-index: 3;
   background: radial-gradient(600px 400px at 50% 40%, rgba(51,255,102,0.04), transparent 70%);
   animation: titlePulse 4s ease-in-out infinite alternate;
 }
 .title-panel {
   position: relative;
+  z-index: 2;
   width: min(980px, 94vw);
   padding: 28px;
   text-align: center;
@@ -473,6 +494,94 @@ body {
 }
 .tab[data-state="active"], .tab.active { background: rgba(51,255,102,0.1); color: var(--ok); }
 .grid-upgrades { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; }
+
+/* ── Hospital Modal ── */
+.hospital-modal {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: min(520px, 92vw); max-height: 80vh; overflow: auto;
+  background: rgba(5,14,5,0.98);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px; pointer-events: auto;
+  z-index: 50;
+  box-shadow: 0 0 60px rgba(0,0,0,0.7), 0 0 20px rgba(51,255,102,0.03);
+}
+.hospital-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border);
+  margin-bottom: 12px; gap: 8px;
+}
+.hospital-name {
+  font-weight: 700; font-size: 14px; font-family: var(--font-display);
+  letter-spacing: 1px; text-transform: uppercase; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.hospital-boro-badge {
+  display: inline-block; font-size: 9px; padding: 2px 8px;
+  border-radius: var(--radius); background: rgba(51,255,102,0.06);
+  border: 1px solid rgba(51,255,102,0.12); color: var(--muted);
+  letter-spacing: 1.5px; text-transform: uppercase; flex-shrink: 0;
+}
+.hospital-personality {
+  margin-bottom: 12px; padding: 8px 10px;
+  background: rgba(5,14,5,0.6); border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.hospital-tagline {
+  font-size: 10px; letter-spacing: 2px; text-transform: uppercase;
+  color: var(--ok); font-family: var(--font-display); margin-bottom: 4px;
+}
+.hospital-character {
+  font-size: 12px; color: var(--muted); line-height: 1.5;
+}
+.hospital-capacity {
+  margin-bottom: 12px;
+}
+.hospital-beds-label {
+  display: flex; justify-content: space-between; margin-bottom: 4px;
+  font-size: 12px; color: var(--text);
+}
+.hospital-section-kicker {
+  font-size: 10px; letter-spacing: 2px; text-transform: uppercase;
+  color: var(--muted); font-family: var(--font-display); margin-bottom: 8px;
+}
+.treatment-card {
+  background: rgba(5,14,5,0.6); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 8px 10px;
+  transition: border-color var(--dur-med);
+}
+.treatment-card:hover {
+  border-color: rgba(51,255,102,0.15);
+}
+.treatment-name {
+  font-weight: 600; font-size: 12px; font-family: var(--font-display);
+  letter-spacing: 0.5px; color: var(--text);
+}
+.treatment-desc {
+  font-size: 11px; color: var(--muted); line-height: 1.4;
+}
+.treatment-status {
+  display: inline-block; font-size: 9px; padding: 1px 6px;
+  border-radius: var(--radius); letter-spacing: 1px; text-transform: uppercase;
+  font-family: var(--font-display); flex-shrink: 0;
+}
+.treatment-status.active { background: rgba(51,255,102,0.1); color: var(--ok); border: 1px solid rgba(51,255,102,0.2); }
+.treatment-status.standby { background: rgba(255,170,0,0.08); color: var(--warn); border: 1px solid rgba(255,170,0,0.15); }
+.treatment-status.classified { background: rgba(255,34,34,0.06); color: var(--err); border: 1px solid rgba(255,34,34,0.12); }
+.neighbor-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 8px; cursor: pointer; border-radius: var(--radius);
+  transition: background var(--dur-fast);
+}
+.neighbor-row:hover {
+  background: rgba(51,255,102,0.04);
+}
+.neighbor-name { font-size: 12px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.neighbor-beds { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.neighbor-load-bar {
+  width: 40px; height: 4px; background: rgba(51,255,102,0.06);
+  border: 1px solid rgba(51,255,102,0.12); border-radius: 0; overflow: hidden;
+}
 
 /* ═══════════════════════════════════════
    RADIX UI — Terminal-styled

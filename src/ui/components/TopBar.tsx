@@ -8,7 +8,9 @@ export function TopBar() {
   const paused = useGameStore((s) => s.paused);
   const day = useGameStore((s) => Math.floor(s.t / s.msPerDay));
   const mode = useGameStore((s) => s.mode);
+  const pathogenType = useGameStore((s) => s.pathogenType);
   const cure = useGameStore((s) => s.cureProgress);
+  const ai = useGameStore((s) => s.aiDirector);
   const actions = useGameStore((s) => s.actions);
   const pacing = useGameStore((s) => s.pacing);
   const toggleStats = useUiStore((s) => s.toggleStats);
@@ -67,6 +69,20 @@ export function TopBar() {
         <button className="btn" title="Toggle Stats Panel" onClick={toggleStats}><PanelLeft size={16} /> Stats</button>
         <button className="btn" title="Toggle Upgrades Panel" onClick={toggleUpgrades}><PanelRight size={16} /> Upgrades</button>
         <button className="btn" title="Reset map view" onClick={() => (window as any).resetNYCView?.()}>Reset View</button>
+        <button
+          className={`btn ${ai?.enabled ? 'active' : ''}`}
+          disabled={pathogenType !== 'virus'}
+          title={pathogenType !== 'virus'
+            ? 'AI director is virus-only for now.'
+            : ai?.pending
+              ? 'AI director is thinking...'
+              : ai?.error
+                ? `Last AI error: ${ai.error}`
+                : 'Toggle AI Evolution Director (beta)'}
+          onClick={() => actions.setAiDirectorEnabled(!ai?.enabled)}
+        >
+          {ai?.pending ? 'AI: Thinking...' : ai?.enabled ? (ai?.error ? 'AI: Error' : 'AI: On') : 'AI: Off'}
+        </button>
         <button className="btn" onClick={actions.saveGame}>Save</button>
         <button className="btn" onClick={actions.loadGame}>Load</button>
         <button className="btn" title="Seed infections (demo)" onClick={() => actions.seedInfection('all')}>Seed I</button>

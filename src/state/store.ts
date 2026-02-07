@@ -1,9 +1,11 @@
 import { create } from 'zustand';
 import { playMilestone } from '../audio/sfx';
 import { immer } from 'zustand/middleware/immer';
-import type { Country, CountryID, TravelEdge, Upgrade, WorldState, GameMode, Story, GeneId, BubbleType, PathogenType, BankedPickup, Params } from './types';
+import type { Country, CountryID, TravelEdge, Upgrade, WorldState, GameMode, Story, GeneId, BubbleType, PathogenType, BankedPickup, Params, AiDirectorDecision, AiDirectorKnobs, AiDirectorState, HospResponseTier } from './types';
 import { STORIES } from '../story/stories';
 import { maybeGenerateWorldEvent } from '../events/worldEvents';
+import { computeDirection, computeVirusDirectorSnapshot } from '../sim/aiDirectorMetrics';
+import { HOSP_RESPONSE_TIERS, nextHospResponseTier } from '../sim/hospResponse';
 
 type Actions = {
   setSpeed: (s: 1 | 3 | 10) => void;
@@ -31,6 +33,7 @@ type Actions = {
     genes?: GeneId[];
     storyId?: string;
     pathogenType?: PathogenType;
+    aiDirectorEnabled?: boolean;
     // optional campaign-specific setup
     seedMode?: 'pick'|'random'|'widespread';
     seedTarget?: CountryID;
@@ -41,6 +44,8 @@ type Actions = {
   addDNA: (delta: number) => void;
   adjustCure: (deltaPercent: number) => void;
   setAwaitingPatientZero: (v: boolean) => void;
+  setAiDirectorEnabled: (v: boolean) => void;
+  requestAiDirectorDecision: () => Promise<void>;
 };
 
 export type GameStore = WorldState & { actions: Actions };
@@ -57,6 +62,86 @@ const PACING_PRESETS = {
 } as const satisfies Record<'slow'|'normal'|'fast', { msPerDay: number; bubbleSpawnMs: number }>;
 
 const BORO_IDS = ['manhattan', 'brooklyn', 'queens', 'bronx', 'staten_island'] as const satisfies readonly CountryID[];
+
+const AI_DIRECTOR_CFG = {
+  minInGameDays: 5,
+  minRealTimeMs: 4 * 60_000,
+  dailyBudget: 45,
+  historyMaxDays: 14,
+  perDecisionMulMin: 0.97,
+  perDecisionMulMax: 1.03,
+  knobMulMin: 0.85,
+  knobMulMax: 1.15,
+  dailyDecayTowardNeutral: 0.08,
+} as const;
+
+const AI_DEFAULT_KNOBS: AiDirectorKnobs = { variantTransMultMul: 1, sigmaMul: 1, muBaseMul: 1 };
+
+function localDateKey(nowMs: number) {
+  const d = new Date(nowMs);
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function clamp(v: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, v));
+}
+
+function clampAiKnob(v: number) {
+  return clamp(v, AI_DIRECTOR_CFG.knobMulMin, AI_DIRECTOR_CFG.knobMulMax);
+}
+
+function decayTowardOne(v: number, frac: number) {
+  return v + (1 - v) * frac;
+}
+
+function fmtPctDelta(mul: number) {
+  const pct = Math.round((mul - 1) * 100);
+  return `${pct >= 0 ? '+' : ''}${pct}%`;
+}
+
+function createAiDirectorState(nowMs: number, enabled: boolean): AiDirectorState {
+  return {
+    enabled,
+    pending: false,
+    error: null,
+    lastEvalDay: null,
+    lastRequestAtMs: null,
+    dailyUsage: { dateKey: localDateKey(nowMs), count: 0 },
+    history: [],
+    knobs: { ...AI_DEFAULT_KNOBS },
+  };
+}
+
+function normalizeAiDecision(raw: unknown, mode: GameMode): AiDirectorDecision | null {
+  const r = raw as any;
+  if (!r || r.version !== 1) return null;
+  const note = typeof r.note === 'string' ? r.note.slice(0, 120) : '';
+  const intent: AiDirectorDecision['intent'] =
+    r.intent === 'increase' || r.intent === 'decrease' || r.intent === 'hold' ? r.intent : 'hold';
+
+  const knobsIn = (r.knobs && typeof r.knobs === 'object') ? r.knobs : {};
+  const knobs: Partial<AiDirectorKnobs> = {};
+
+  const readMul = (k: keyof AiDirectorKnobs) => {
+    const v = (knobsIn as any)[k];
+    if (typeof v !== 'number' || !Number.isFinite(v)) return undefined;
+    let mul = clamp(v, AI_DIRECTOR_CFG.perDecisionMulMin, AI_DIRECTOR_CFG.perDecisionMulMax);
+    if (mode === 'controller' && k === 'muBaseMul') mul = Math.min(1, mul);
+    return mul;
+  };
+
+  const vMul = readMul('variantTransMultMul');
+  const sMul = readMul('sigmaMul');
+  const mMul = readMul('muBaseMul');
+  if (typeof vMul === 'number') knobs.variantTransMultMul = vMul;
+  if (typeof sMul === 'number') knobs.sigmaMul = sMul;
+  if (typeof mMul === 'number') knobs.muBaseMul = mMul;
+
+  return { version: 1, note, intent, knobs };
+}
 
 function clampSeedAmount(n: unknown, fallback: number) {
   const v = typeof n === 'number' && Number.isFinite(n) ? n : fallback;
@@ -195,24 +280,90 @@ const baseUpgradesArchitect = (): Record<string, Upgrade> => ({
   tx1: { id: 'tx1', name: 'Aerosol Stability', branch: 'transmission', cost: 8, desc: '+10% transmission', effects: { betaMul: 1.10 } },
   tx2: { id: 'tx2', name: 'Surface Persistence', branch: 'transmission', cost: 16, desc: '+12% transmission', effects: { betaMul: 1.12 }, prereqs: ['tx1'] },
   tx3: { id: 'tx3', name: 'Shorter Incubation', branch: 'transmission', cost: 18, desc: '+10% incubation rate', effects: { sigmaMul: 1.10 }, prereqs: ['tx1'] },
+  tx4: { id: 'tx4', name: 'Subway Aerosolization', branch: 'transmission', cost: 22, desc: 'Pathogen survives 6+ hours on stainless steel handrails. The morning commute becomes a vector.', effects: { betaMul: 1.14 }, prereqs: ['tx2'] },
+  tx5: { id: 'tx5', name: 'Fomite Persistence', branch: 'transmission', cost: 28, desc: 'Doorknobs, elevator buttons, turnstiles -- every surface holds the pathogen for 48 hours.', effects: { betaMul: 1.08, sigmaMul: 1.05 }, prereqs: ['tx4'] },
+  tx6: { id: 'tx6', name: 'Waterborne Transmission', branch: 'transmission', cost: 32, desc: 'Trace amounts detected in municipal water supply. Boil advisories issued too late.', effects: { betaMul: 1.10, importationMul: 1.15 }, prereqs: ['tx2'] },
+  tx7: { id: 'tx7', name: 'Rodent Vector', branch: 'transmission', cost: 18, desc: "NYC's 2 million rats become unwitting carriers. Subterranean spread bypasses surface quarantines.", effects: { betaMul: 1.06, travelReductionMul: 1.08 }, prereqs: ['tx1'] },
+  tx8: { id: 'tx8', name: 'Airborne Drift', branch: 'transmission', cost: 38, desc: 'Viability at distances exceeding 6 meters. Social distancing guidelines become obsolete overnight.', effects: { betaMul: 1.16 }, prereqs: ['tx5'] },
+  tx9: { id: 'tx9', name: 'Vertical Transmission', branch: 'transmission', cost: 24, desc: 'Mother-to-child transmission confirmed. Neonatal wards enter crisis protocols.', effects: { betaMul: 1.05, exposedDurationMul: 0.9 }, prereqs: ['tx3'] },
+  tx10: { id: 'tx10', name: 'Food Supply Chain', branch: 'transmission', cost: 30, desc: 'Contaminated shipments from Hunts Point Market distribute pathogen to every borough simultaneously.', effects: { importationMul: 1.25, betaMul: 1.06 }, prereqs: ['tx6'] },
+  tx11: { id: 'tx11', name: 'Environmental Reservoir', branch: 'transmission', cost: 42, desc: 'The pathogen persists in soil, standing water, and HVAC systems. Reinfection becomes possible.', effects: { betaMul: 1.08, reinfectionRate: 0.002 }, prereqs: ['tx8'] },
+  tx12: { id: 'tx12', name: 'Superspreader Events', branch: 'transmission', cost: 35, desc: 'Mass gatherings amplify spread exponentially. One concert. One subway car. One funeral.', effects: { betaMul: 1.20, dnaRateAdd: 0.08 }, prereqs: ['tx4'] },
+  tx13: { id: 'tx13', name: 'Pandemic Adaptation', branch: 'transmission', cost: 50, desc: 'Total environmental integration. The pathogen is everywhere, in everything, undeniable.', effects: { betaMul: 1.12, policyResistMul: 1.15 }, prereqs: ['tx11', 'tx12'] },
 
   sym1: { id: 'sym1', name: 'Stealthy Symptoms', branch: 'symptoms', cost: 12, desc: 'Undercut policy (×1.2 resist)', effects: { policyResistMul: 1.2 } },
   sym2: { id: 'sym2', name: 'Aggressive Shedding', branch: 'symptoms', cost: 20, desc: '+8% transmission, +0.1 DNA/day', effects: { betaMul: 1.08, dnaRateAdd: 0.1 }, prereqs: ['sym1'] },
+  sym3: { id: 'sym3', name: 'Subclinical Fatigue', branch: 'symptoms', cost: 16, desc: 'Infected feel tired but functional. They go to work. They ride the subway. They spread it.', effects: { policyResistMul: 1.15, asymptomaticSpreadMul: 1.10 }, prereqs: ['sym1'] },
+  sym4: { id: 'sym4', name: 'Delayed Onset', branch: 'symptoms', cost: 22, desc: 'Incubation extends invisibly. By the time symptoms appear, everyone nearby is already exposed.', effects: { exposedDurationMul: 0.8, policyResistMul: 1.1 }, prereqs: ['sym3'] },
+  sym5: { id: 'sym5', name: 'Neurological Fog', branch: 'symptoms', cost: 28, desc: 'Cognitive impairment makes patients forget protocols, miss doses, wander. Compliance collapses.', effects: { betaMul: 1.06, policyResistMul: 1.2 }, prereqs: ['sym2'] },
+  sym6: { id: 'sym6', name: 'Hemorrhagic Presentation', branch: 'symptoms', cost: 34, desc: 'Visible bleeding triggers panic. Emergency rooms overflow. The fear spreads faster than the pathogen.', effects: { muMul: 1.3, dnaRateAdd: 0.15 }, prereqs: ['sym2'] },
+  sym7: { id: 'sym7', name: 'Organ Tropism', branch: 'symptoms', cost: 40, desc: 'Multi-organ involvement. Patients need ventilators, dialysis, and interventions simultaneously.', effects: { hospRateMul: 1.25, muMul: 1.15 }, prereqs: ['sym6'] },
+  sym8: { id: 'sym8', name: 'Immunosuppressive Cascade', branch: 'symptoms', cost: 36, desc: 'The immune system turns against itself. Recovery stalls. Secondary infections follow.', effects: { gammaRecMul: 0.85, cureRateMul: 0.9 }, prereqs: ['sym5'] },
+  sym9: { id: 'sym9', name: 'Asymptomatic Shedding Peak', branch: 'symptoms', cost: 26, desc: 'Maximum viral load occurs before symptom onset. Testing cannot keep up.', effects: { betaMul: 1.12, asymptomaticSpreadMul: 1.2 }, prereqs: ['sym3'] },
+  sym10: { id: 'sym10', name: 'Chronic Sequelae', branch: 'symptoms', cost: 32, desc: "Long-term effects. Recovered patients relapse. The 'recovered' category becomes unreliable.", effects: { gammaRecMul: 0.9, reinfectionRate: 0.001 }, prereqs: ['sym8'] },
+  sym11: { id: 'sym11', name: 'Pain Suppression', branch: 'symptoms', cost: 20, desc: "Fewer show symptoms. More move freely. The pathogen hides behind the body's silence.", effects: { symFracMul: 0.85, betaMul: 1.05 }, prereqs: ['sym1'] },
+  sym12: { id: 'sym12', name: 'Cytokine Storm Trigger', branch: 'symptoms', cost: 48, desc: 'Fatal immune overreaction in 15% of cases. Hospitals cannot intervene fast enough.', effects: { muMul: 1.4, hospRateMul: 1.3, dnaRateAdd: 0.2 }, prereqs: ['sym7', 'sym8'] },
 
   ab1: { id: 'ab1', name: 'Immune Escape v1', branch: 'abilities', cost: 14, desc: '-5% recovery speed', effects: { gammaRecMul: 0.95 } },
   ab2: { id: 'ab2', name: 'Policy Evasion', branch: 'abilities', cost: 22, desc: 'Undercut policy (×1.5 resist)', effects: { policyResistMul: 1.5 }, prereqs: ['ab1'] },
   ab3: { id: 'ab3', name: 'Cold Resistant', branch: 'abilities', cost: 12, desc: '+5% transmission (cold season)', effects: { betaMul: 1.05 } },
   ab4: { id: 'ab4', name: 'Genetic Reshuffle', branch: 'abilities', cost: 24, desc: 'Slows cure progress (−20%)', effects: { cureRateMul: 0.8 } },
+  ab5: { id: 'ab5', name: 'Drug Resistance', branch: 'abilities', cost: 26, desc: 'Standard antivirals fail. Pharmaceutical companies scramble. The clock resets on treatment.', effects: { gammaRecMul: 0.88, cureRateMul: 0.85 }, prereqs: ['ab1'] },
+  ab6: { id: 'ab6', name: 'Thermal Tolerance', branch: 'abilities', cost: 18, desc: 'Survives body temperature extremes. Fever is no longer a defense mechanism.', effects: { betaMul: 1.07 }, prereqs: ['ab3'] },
+  ab7: { id: 'ab7', name: 'Immune Memory Evasion', branch: 'abilities', cost: 34, desc: 'Antigenic shift defeats prior immunity. Recovered patients are susceptible again.', effects: { gammaRecMul: 0.9, reinfectionRate: 0.003 }, prereqs: ['ab2'] },
+  ab8: { id: 'ab8', name: 'Detection Evasion', branch: 'abilities', cost: 28, desc: 'False negatives in standard PCR tests. The pathogen hides from the diagnostic toolkit.', effects: { detectionDelayAdd: 3 }, prereqs: ['ab2'] },
+  ab9: { id: 'ab9', name: 'Policy Fatigue Exploitation', branch: 'abilities', cost: 30, desc: 'Public compliance erodes. Lockdown violations spike. The pathogen waits for human nature.', effects: { policyResistMul: 1.35 }, prereqs: ['ab2'] },
+  ab10: { id: 'ab10', name: 'Environmental Hardening', branch: 'abilities', cost: 22, desc: 'UV resistance, chlorine tolerance. Decontamination protocols become inadequate.', effects: { betaMul: 1.04, importationMul: 1.1 }, prereqs: ['ab3'] },
+  ab11: { id: 'ab11', name: 'Death Dividend', branch: 'abilities', cost: 36, desc: 'Each fatality generates research data for the pathogen. A grim feedback loop.', effects: { dnaPerDeathAdd: 0.005, muMul: 1.1 }, prereqs: ['ab4'] },
+  ab12: { id: 'ab12', name: 'Cross-Species Reservoir', branch: 'abilities', cost: 44, desc: 'Animal reservoirs in Central Park, Prospect Park, the Bronx Zoo. Eradication becomes impossible.', effects: { reinfectionRate: 0.004, importationMul: 1.2 }, prereqs: ['ab7'] },
+  ab13: { id: 'ab13', name: 'Diagnostic Sabotage', branch: 'abilities', cost: 38, desc: 'Molecular mimicry confuses antibody tests. Every negative result is suspect.', effects: { cureRateMul: 0.75, detectionDelayAdd: 2 }, prereqs: ['ab8'] },
+  ab14: { id: 'ab14', name: 'Total Immune Evasion', branch: 'abilities', cost: 55, desc: 'The pathogen is invisible to the immune system. Natural recovery approaches zero.', effects: { gammaRecMul: 0.8, cureRateMul: 0.7, policyResistMul: 1.2 }, prereqs: ['ab12', 'ab13'] },
 });
 
 const baseUpgradesController = (): Record<string, Upgrade> => ({
   ops1: { id: 'ops1', name: 'Mask Mandate', branch: 'transmission', cost: 8, desc: 'Reduce contacts (−8% β)', effects: { betaMul: 0.92 } },
-  ops2: { id: 'ops2', name: 'Testing Ramp-up', branch: 'abilities', cost: 10, desc: 'Faster recovery via isolation (+5% γ) and research (+0.05%/day)', effects: { gammaRecMul: 1.05, cureAddPerDay: 0.05 } as any },
-  ops3: { id: 'ops3', name: 'Contact Tracing', branch: 'abilities', cost: 14, desc: 'Reduce effective contacts (−10% β) and research (+0.04%/day)', effects: { betaMul: 0.90, cureAddPerDay: 0.04 } as any, prereqs: ['ops2'] },
+  ops2: { id: 'ops2', name: 'Testing Ramp-up', branch: 'abilities', cost: 10, desc: 'Faster recovery via isolation (+5% γ) and research (+0.05%/day)', effects: { gammaRecMul: 1.05, cureAddPerDay: 0.05 } },
+  ops3: { id: 'ops3', name: 'Contact Tracing', branch: 'abilities', cost: 14, desc: 'Reduce effective contacts (−10% β) and research (+0.04%/day)', effects: { betaMul: 0.90, cureAddPerDay: 0.04 }, prereqs: ['ops2'] },
   ops4: { id: 'ops4', name: 'Border Screening', branch: 'transmission', cost: 12, desc: 'Lower importations (−50%)', effects: { importationMul: 0.5 } },
-  ops5: { id: 'ops5', name: 'Public Campaigns', branch: 'symptoms', cost: 10, desc: 'Boost policy effectiveness (×1.25) and research (+0.03%/day)', effects: { policyResistMul: 1.25, cureAddPerDay: 0.03 } as any },
-  ops6: { id: 'ops6', name: 'Vaccine R&D', branch: 'abilities', cost: 18, desc: 'Accelerate cure (+25%) and research (+0.25%/day)', effects: { cureRateMul: 1.25, cureAddPerDay: 0.25 } as any },
-  ops7: { id: 'ops7', name: 'Vaccine Manufacturing', branch: 'abilities', cost: 22, desc: 'Accelerate cure (+35%) and research (+0.35%/day)', effects: { cureRateMul: 1.35, cureAddPerDay: 0.35 } as any, prereqs: ['ops6'] },
+  ops5: { id: 'ops5', name: 'Public Campaigns', branch: 'symptoms', cost: 10, desc: 'Boost policy effectiveness (×1.25) and research (+0.03%/day)', effects: { policyResistMul: 1.25, cureAddPerDay: 0.03 } },
+  ops6: { id: 'ops6', name: 'Vaccine R&D', branch: 'abilities', cost: 18, desc: 'Accelerate cure (+25%) and research (+0.25%/day)', effects: { cureRateMul: 1.25, cureAddPerDay: 0.25 } },
+  ops7: { id: 'ops7', name: 'Vaccine Manufacturing', branch: 'abilities', cost: 22, desc: 'Accelerate cure (+35%) and research (+0.35%/day)', effects: { cureRateMul: 1.35, cureAddPerDay: 0.35 }, prereqs: ['ops6'] },
+
+  // Transmission branch (new)
+  ops_tx1: { id: 'ops_tx1', name: 'Subway Sanitation Protocol', branch: 'transmission', cost: 14, desc: 'Nightly deep-clean of all MTA rolling stock. UV lamps in stations. The commute gets safer.', effects: { betaMul: 0.94 }, prereqs: ['ops1'] },
+  ops_tx2: { id: 'ops_tx2', name: 'Ventilation Overhaul', branch: 'transmission', cost: 20, desc: 'MERV-13 filters mandatory in public buildings. Air quality sensors in every school.', effects: { betaMul: 0.92 }, prereqs: ['ops_tx1'] },
+  ops_tx3: { id: 'ops_tx3', name: 'Water Treatment Enhancement', branch: 'transmission', cost: 18, desc: 'Enhanced chlorination and UV treatment at all municipal water facilities.', effects: { betaMul: 0.96, importationMul: 0.85 }, prereqs: ['ops4'] },
+  ops_tx4: { id: 'ops_tx4', name: 'Rodent Control Blitz', branch: 'transmission', cost: 16, desc: 'Emergency pest control across all five boroughs. The rats retreat, the vectors diminish.', effects: { betaMul: 0.97, travelReductionMul: 0.95 }, prereqs: ['ops1'] },
+  ops_tx5: { id: 'ops_tx5', name: 'Social Distance Enforcement', branch: 'transmission', cost: 24, desc: 'Capacity limits enforced with fines. Compliance improves but resentment builds.', effects: { betaMul: 0.88, policyResistMul: 1.15 }, prereqs: ['ops_tx2'] },
+  ops_tx6: { id: 'ops_tx6', name: 'Travel Corridor Restrictions', branch: 'transmission', cost: 22, desc: 'Bridge and tunnel checkpoints. Inter-borough movement drops sharply.', effects: { importationMul: 0.6, travelReductionMul: 0.85 }, prereqs: ['ops4'] },
+  ops_tx7: { id: 'ops_tx7', name: 'Air Filtration Mandate', branch: 'transmission', cost: 30, desc: 'HEPA requirements for all commercial spaces. Landlords protest. Tenants breathe easier.', effects: { betaMul: 0.9 }, prereqs: ['ops_tx2'] },
+  ops_tx8: { id: 'ops_tx8', name: 'Gathering Ban', branch: 'transmission', cost: 28, desc: 'Events over 10 people prohibited. Bars, theaters, stadiums go dark.', effects: { betaMul: 0.85, policyResistMul: 1.2 }, prereqs: ['ops_tx5'] },
+  ops_tx9: { id: 'ops_tx9', name: 'Essential Workers Only', branch: 'transmission', cost: 36, desc: 'Non-essential businesses shuttered. Streets empty. The city holds its breath.', effects: { travelReductionMul: 0.7, betaMul: 0.88 }, prereqs: ['ops_tx6'] },
+  ops_tx10: { id: 'ops_tx10', name: 'Total Shelter-in-Place', branch: 'transmission', cost: 48, desc: 'Mandatory home confinement. National Guard patrols. Transmission plummets, but at what cost?', effects: { betaMul: 0.75, travelReductionMul: 0.5, policyResistMul: 1.4 }, prereqs: ['ops_tx8', 'ops_tx9'] },
+
+  // Symptoms branch (new)
+  ops_sym1: { id: 'ops_sym1', name: 'Early Warning System', branch: 'symptoms', cost: 12, desc: 'Syndromic surveillance in ERs across all boroughs. Clusters flagged within hours.', effects: { detectionDelayAdd: -1, cureAddPerDay: 0.02 }, prereqs: ['ops5'] },
+  ops_sym2: { id: 'ops_sym2', name: 'School Screening Program', branch: 'symptoms', cost: 16, desc: 'Daily temperature checks and symptom questionnaires. Children become sentinels.', effects: { betaMul: 0.96, cureAddPerDay: 0.02 }, prereqs: ['ops5'] },
+  ops_sym3: { id: 'ops_sym3', name: 'Workplace Health Mandate', branch: 'symptoms', cost: 20, desc: 'Employers required to report cases. Sick leave mandated. Compliance generates intelligence.', effects: { betaMul: 0.94, opsPerDayAdd: 0.3 }, prereqs: ['ops_sym2'] },
+  ops_sym4: { id: 'ops_sym4', name: 'Sewage Surveillance', branch: 'symptoms', cost: 22, desc: "Wastewater monitoring reveals outbreaks 5 days before clinical data. The sewers know first.", effects: { detectionDelayAdd: -2, cureAddPerDay: 0.04 }, prereqs: ['ops_sym1'] },
+  ops_sym5: { id: 'ops_sym5', name: 'Public Information Campaign', branch: 'symptoms', cost: 14, desc: 'Multilingual PSAs on every subway screen, bus stop, and bodega window.', effects: { policyResistMul: 1.3, cureAddPerDay: 0.02 }, prereqs: ['ops5'] },
+  ops_sym6: { id: 'ops_sym6', name: 'Mental Health Response', branch: 'symptoms', cost: 18, desc: 'Crisis counselors deployed. Compliance improves when fear is addressed, not just mandated.', effects: { policyResistMul: 1.2 }, prereqs: ['ops_sym5'] },
+  ops_sym7: { id: 'ops_sym7', name: 'Rapid Home Test Distribution', branch: 'symptoms', cost: 26, desc: 'Free test kits at every pharmacy and community center. Isolation begins at home.', effects: { betaMul: 0.93, gammaRecMul: 1.05 }, prereqs: ['ops_sym4'] },
+  ops_sym8: { id: 'ops_sym8', name: 'Long-Term Care Protocols', branch: 'symptoms', cost: 24, desc: 'Specialized treatment pathways for chronic cases. Fewer deaths, faster turnover.', effects: { mortalityHospMul: 0.85, dischargeMul: 1.08 }, prereqs: ['ops_sym3'] },
+  ops_sym9: { id: 'ops_sym9', name: 'Community Trust Building', branch: 'symptoms', cost: 30, desc: 'Town halls, religious leader partnerships, local influencer outreach. Trust is the real vaccine.', effects: { policyResistMul: 1.35, betaMul: 0.96 }, prereqs: ['ops_sym6'] },
+  ops_sym10: { id: 'ops_sym10', name: 'Pandemic Preparedness Doctrine', branch: 'symptoms', cost: 42, desc: 'Total institutional readiness. Every hospital, school, and workplace has a plan that works.', effects: { policyResistMul: 1.4, cureAddPerDay: 0.06, betaMul: 0.94 }, prereqs: ['ops_sym9', 'ops_sym7'] },
+
+  // Abilities branch (new)
+  ops_ab1: { id: 'ops_ab1', name: 'Hospital Surge Capacity', branch: 'abilities', cost: 16, desc: 'Beds in hallways, tents in parking lots. Capacity stretches. Quality bends but does not break.', effects: { hospCapacityMul: 1.2, dischargeMul: 1.05 }, prereqs: ['ops2'] },
+  ops_ab2: { id: 'ops_ab2', name: 'Experimental Therapeutics', branch: 'abilities', cost: 22, desc: 'Compassionate use protocols. Untested drugs with promising signals. Risk vs. time.', effects: { gammaRecMul: 1.1, cureAddPerDay: 0.08 }, prereqs: ['ops6'] },
+  ops_ab3: { id: 'ops_ab3', name: 'International Data Sharing', branch: 'abilities', cost: 18, desc: 'NYC links its genomic data to WHO networks. Global cooperation accelerates the cure.', effects: { cureAddPerDay: 0.1, cureRateMul: 1.1 }, prereqs: ['ops2'] },
+  ops_ab4: { id: 'ops_ab4', name: 'Quarantine Optimization', branch: 'abilities', cost: 24, desc: 'Dedicated quarantine facilities with monitoring. Compliance improves without coercion.', effects: { quarantineEffMul: 1.3, betaMul: 0.95 }, prereqs: ['ops3'] },
+  ops_ab5: { id: 'ops_ab5', name: 'Mobile Testing Fleet', branch: 'abilities', cost: 20, desc: 'Repurposed food trucks with PCR capability. They come to you. No appointments, no excuses.', effects: { gammaRecMul: 1.08, cureAddPerDay: 0.04 }, prereqs: ['ops3'] },
+  ops_ab6: { id: 'ops_ab6', name: 'Vaccine Fast-Track', branch: 'abilities', cost: 32, desc: 'Emergency use authorization. Phase III trials compressed. The timeline shrinks to months.', effects: { cureRateMul: 1.4, cureAddPerDay: 0.3 }, prereqs: ['ops7'] },
+  ops_ab7: { id: 'ops_ab7', name: 'Mass Vaccination Sites', branch: 'abilities', cost: 38, desc: 'Javits Center, Citi Field, Barclays -- every arena becomes a vaccination hub.', effects: { cureRateMul: 1.3, cureAddPerDay: 0.4 }, prereqs: ['ops_ab6'] },
+  ops_ab8: { id: 'ops_ab8', name: 'Healthcare Worker Protection', branch: 'abilities', cost: 20, desc: 'N95s, face shields, hazard pay. Protect the protectors or the system collapses.', effects: { hospCapacityMul: 1.15, mortalityHospMul: 0.9 }, prereqs: ['ops_ab1'] },
+  ops_ab9: { id: 'ops_ab9', name: 'Supply Chain Resilience', branch: 'abilities', cost: 26, desc: 'Strategic stockpiles of PPE, ventilators, and medications. Never caught empty-handed again.', effects: { hospCapacityMul: 1.1, importationMul: 0.8 }, prereqs: ['ops_ab4'] },
+  ops_ab10: { id: 'ops_ab10', name: 'Operation Endgame', branch: 'abilities', cost: 55, desc: 'Total mobilization. Every resource, every agency, every citizen aligned toward eradication.', effects: { cureRateMul: 1.5, cureAddPerDay: 0.5, betaMul: 0.9 }, prereqs: ['ops_ab7', 'ops_ab9'] },
 });
 
 function typeSpecificUpgrades(mode: GameMode, pathogenType: PathogenType): Record<string, Upgrade> {
@@ -225,7 +376,7 @@ function typeSpecificUpgrades(mode: GameMode, pathogenType: PathogenType): Recor
           branch: 'abilities',
           cost: 12,
           desc: 'Manage mutation debt: fewer bad mutations, faster debt decay.',
-          effects: { mutationChanceMul: 0.85, mutationDebtDecayAdd: 1 } as any,
+          effects: { mutationChanceMul: 0.85, mutationDebtDecayAdd: 1 },
         },
         vx_stab2: {
           id: 'vx_stab2',
@@ -233,7 +384,7 @@ function typeSpecificUpgrades(mode: GameMode, pathogenType: PathogenType): Recor
           branch: 'abilities',
           cost: 18,
           desc: 'Further stabilize: reduced mutation chance and faster debt burn-off.',
-          effects: { mutationChanceMul: 0.8, mutationDebtDecayAdd: 2 } as any,
+          effects: { mutationChanceMul: 0.8, mutationDebtDecayAdd: 2 },
           prereqs: ['vx_stab1'],
         },
       };
@@ -246,7 +397,7 @@ function typeSpecificUpgrades(mode: GameMode, pathogenType: PathogenType): Recor
           branch: 'abilities',
           cost: 14,
           desc: 'Resistance builds faster (slower cure), but costs speed.',
-          effects: { resistancePressureMul: 1.25, betaMul: 0.96 } as any,
+          effects: { resistancePressureMul: 1.25, betaMul: 0.96 },
         },
         bac_biofilm: {
           id: 'bac_biofilm',
@@ -254,7 +405,7 @@ function typeSpecificUpgrades(mode: GameMode, pathogenType: PathogenType): Recor
           branch: 'symptoms',
           cost: 18,
           desc: 'Harder to clear; resistance persists.',
-          effects: { gammaRecMul: 0.92, resistanceDecayAdd: -0.5 } as any,
+          effects: { gammaRecMul: 0.92, resistanceDecayAdd: -0.5 },
         },
       };
     }
@@ -266,7 +417,7 @@ function typeSpecificUpgrades(mode: GameMode, pathogenType: PathogenType): Recor
           branch: 'abilities',
           cost: 12,
           desc: 'More frequent spore bursts (weather still matters).',
-          effects: { fungusBurstChanceMul: 1.35 } as any,
+          effects: { fungusBurstChanceMul: 1.35 },
         },
         fun_spore2: {
           id: 'fun_spore2',
@@ -274,7 +425,7 @@ function typeSpecificUpgrades(mode: GameMode, pathogenType: PathogenType): Recor
           branch: 'abilities',
           cost: 18,
           desc: 'Spore bursts last longer.',
-          effects: { fungusBurstDurationAdd: 1 } as any,
+          effects: { fungusBurstDurationAdd: 1 },
           prereqs: ['fun_spore1'],
         },
       };
@@ -287,7 +438,7 @@ function typeSpecificUpgrades(mode: GameMode, pathogenType: PathogenType): Recor
         branch: 'abilities',
         cost: 16,
         desc: 'Slower volatility ramp: more predictable spread, fewer sudden spikes.',
-        effects: { bioweaponVolatilityRateMul: 0.75, betaMul: 1.03 } as any,
+        effects: { bioweaponVolatilityRateMul: 0.75, betaMul: 1.03 },
       },
     };
   }
@@ -301,7 +452,7 @@ function typeSpecificUpgrades(mode: GameMode, pathogenType: PathogenType): Recor
         branch: 'abilities',
         cost: 12,
         desc: 'Reduces mutation churn; improves research slightly.',
-        effects: { mutationChanceMul: 0.9, cureAddPerDay: 0.05 } as any,
+        effects: { mutationChanceMul: 0.9, cureAddPerDay: 0.05 },
       },
     };
   }
@@ -313,7 +464,7 @@ function typeSpecificUpgrades(mode: GameMode, pathogenType: PathogenType): Recor
         branch: 'symptoms',
         cost: 10,
         desc: 'Resistance decays faster; slows resistance buildup.',
-        effects: { resistanceDecayAdd: 1.5, resistancePressureMul: 0.85 } as any,
+        effects: { resistanceDecayAdd: 1.5, resistancePressureMul: 0.85 },
       },
     };
   }
@@ -325,7 +476,7 @@ function typeSpecificUpgrades(mode: GameMode, pathogenType: PathogenType): Recor
         branch: 'symptoms',
         cost: 12,
         desc: 'Cuts spore-burst frequency and duration (at a cost).',
-        effects: { fungusBurstChanceMul: 0.75, fungusBurstDurationAdd: -1, cureAddPerDay: -0.02 } as any,
+        effects: { fungusBurstChanceMul: 0.75, fungusBurstDurationAdd: -1, cureAddPerDay: -0.02 },
       },
     };
   }
@@ -337,7 +488,7 @@ function typeSpecificUpgrades(mode: GameMode, pathogenType: PathogenType): Recor
       branch: 'abilities',
       cost: 12,
       desc: 'Containment cordons last longer.',
-      effects: { cordonDaysAdd: 2 } as any,
+      effects: { cordonDaysAdd: 2 },
     },
     cbio_cordon2: {
       id: 'cbio_cordon2',
@@ -345,7 +496,7 @@ function typeSpecificUpgrades(mode: GameMode, pathogenType: PathogenType): Recor
       branch: 'abilities',
       cost: 16,
       desc: 'Containment cordons cost less to deploy.',
-      effects: { cordonCostDelta: -1 } as any,
+      effects: { cordonCostDelta: -1 },
       prereqs: ['cbio_cordon1'],
     },
   };
@@ -386,16 +537,16 @@ function upgradesFor(mode: GameMode, campaignId?: string): Record<string, Upgrad
         cp_m3: { id: 'cp_m3', name: 'Targeted Closures', branch: 'transmission', cost: 14, desc: 'Reduce contacts (−12% β)', effects: { betaMul: 0.88 }, prereqs: ['cp_m2'] },
 
         // Public & Policy (symptoms label for controller)
-        cp_p1: { id: 'cp_p1', name: 'Public Campaigns', branch: 'symptoms', cost: 8, desc: 'Boost policy effectiveness (×1.2) + research (+0.04%/day)', effects: { policyResistMul: 1.2, cureAddPerDay: 0.04 } as any },
-        cp_p2: { id: 'cp_p2', name: 'School Protocols', branch: 'symptoms', cost: 12, desc: 'Reduce contacts (−6% β), +0.03% research/day', effects: { betaMul: 0.94, cureAddPerDay: 0.03 } as any, prereqs: ['cp_p1'] },
+        cp_p1: { id: 'cp_p1', name: 'Public Campaigns', branch: 'symptoms', cost: 8, desc: 'Boost policy effectiveness (×1.2) + research (+0.04%/day)', effects: { policyResistMul: 1.2, cureAddPerDay: 0.04 } },
+        cp_p2: { id: 'cp_p2', name: 'School Protocols', branch: 'symptoms', cost: 12, desc: 'Reduce contacts (−6% β), +0.03% research/day', effects: { betaMul: 0.94, cureAddPerDay: 0.03 }, prereqs: ['cp_p1'] },
         cp_p3: { id: 'cp_p3', name: 'Economic Support', branch: 'symptoms', cost: 12, desc: 'Improve compliance (×1.2 policy)', effects: { policyResistMul: 1.2 }, prereqs: ['cp_p1'] },
 
         // Research & Ops (abilities)
-        cp_r1: { id: 'cp_r1', name: 'Testing Ramp-up', branch: 'abilities', cost: 10, desc: 'Faster recovery (+5% γ) + research (+0.06%/day)', effects: { gammaRecMul: 1.05, cureAddPerDay: 0.06 } as any },
-        cp_r2: { id: 'cp_r2', name: 'Contact Tracing', branch: 'abilities', cost: 14, desc: 'Reduce contacts (−8% β) + research (+0.05%/day)', effects: { betaMul: 0.92, cureAddPerDay: 0.05 } as any, prereqs: ['cp_r1'] },
+        cp_r1: { id: 'cp_r1', name: 'Testing Ramp-up', branch: 'abilities', cost: 10, desc: 'Faster recovery (+5% γ) + research (+0.06%/day)', effects: { gammaRecMul: 1.05, cureAddPerDay: 0.06 } },
+        cp_r2: { id: 'cp_r2', name: 'Contact Tracing', branch: 'abilities', cost: 14, desc: 'Reduce contacts (−8% β) + research (+0.05%/day)', effects: { betaMul: 0.92, cureAddPerDay: 0.05 }, prereqs: ['cp_r1'] },
         cp_r3: { id: 'cp_r3', name: 'Hospital Surge', branch: 'abilities', cost: 16, desc: 'Boost discharge (+10%), lower mortality (−10%)', effects: { dischargeMul: 1.10, muMul: 0.90 } },
-        cp_r4: { id: 'cp_r4', name: 'Vaccine R&D', branch: 'abilities', cost: 18, desc: 'Accelerate cure (+25%) +0.25%/day', effects: { cureRateMul: 1.25, cureAddPerDay: 0.25 } as any, prereqs: ['cp_r1'] },
-        cp_r5: { id: 'cp_r5', name: 'Vaccine Manufacturing', branch: 'abilities', cost: 24, desc: 'Accelerate cure (+35%) +0.35%/day', effects: { cureRateMul: 1.35, cureAddPerDay: 0.35 } as any, prereqs: ['cp_r4'] },
+        cp_r4: { id: 'cp_r4', name: 'Vaccine R&D', branch: 'abilities', cost: 18, desc: 'Accelerate cure (+25%) +0.25%/day', effects: { cureRateMul: 1.25, cureAddPerDay: 0.25 }, prereqs: ['cp_r1'] },
+        cp_r5: { id: 'cp_r5', name: 'Vaccine Manufacturing', branch: 'abilities', cost: 24, desc: 'Accelerate cure (+35%) +0.35%/day', effects: { cureRateMul: 1.35, cureAddPerDay: 0.35 }, prereqs: ['cp_r4'] },
       };
     }
     return baseUpgradesController();
@@ -487,6 +638,8 @@ export const useGameStore = create<GameStore>()(
     selectedCountryId: null,
     mode: 'architect',
     pathogenType: 'virus',
+    hospResponseTier: 0,
+    aiDirector: createAiDirectorState(Date.now(), false),
     mutationDebt: 0,
     antibioticResistance: 0,
     fungusBurstDaysLeft: 0,
@@ -525,6 +678,156 @@ export const useGameStore = create<GameStore>()(
         st.autoCollectBubbles = v;
         try { localStorage.setItem('autoCollectBubblesV1', v ? '1' : '0'); } catch {}
       }),
+      setAiDirectorEnabled: (v) => set((st) => {
+        if (!st.aiDirector) st.aiDirector = createAiDirectorState(Date.now(), false);
+        // Only virus can be AI-directed in this iteration.
+        const nextEnabled = Boolean(v && st.pathogenType === 'virus');
+        st.aiDirector.enabled = nextEnabled;
+        st.aiDirector.error = null;
+        if (nextEnabled) {
+          // Treat enabling as a "fresh" start: wait a few in-game days before
+          // calling out to the model so we have a trend signal.
+          st.aiDirector.lastEvalDay = Math.max(0, Math.floor(st.t / Math.max(1, st.msPerDay)));
+          st.aiDirector.pending = false;
+        } else {
+          st.aiDirector.pending = false;
+          st.aiDirector.knobs = { ...AI_DEFAULT_KNOBS };
+        }
+      }),
+      requestAiDirectorDecision: async () => {
+        const st0 = get();
+        const ai0 = st0.aiDirector;
+        if (!ai0?.enabled) return;
+        if (st0.pathogenType !== 'virus') return;
+        if (ai0.pending) return;
+
+        const nowMs = Date.now();
+        const dayIndex = Math.max(0, Math.floor(st0.t / Math.max(1, st0.msPerDay)));
+
+        // If we've never applied a decision, treat the "last eval" as day 0 so
+        // we wait a minimum amount of simulated time before the first call.
+        const lastEvalDay = ai0.lastEvalDay ?? 0;
+        if (dayIndex - lastEvalDay < AI_DIRECTOR_CFG.minInGameDays) return;
+        const lastReq = ai0.lastRequestAtMs ?? 0;
+        if (nowMs - lastReq < AI_DIRECTOR_CFG.minRealTimeMs) return;
+
+        const dk = localDateKey(nowMs);
+        const used = ai0.dailyUsage?.dateKey === dk ? ai0.dailyUsage.count : 0;
+        if (used >= AI_DIRECTOR_CFG.dailyBudget) return;
+
+        const latest = ai0.history?.[ai0.history.length - 1] ?? computeVirusDirectorSnapshot(st0);
+        const hist = (ai0.history?.length ? ai0.history : [latest]).slice(-AI_DIRECTOR_CFG.historyMaxDays);
+        if (hist.length < 3) return;
+        const direction = computeDirection(hist);
+        const intensities7d = hist.slice(-7).map((h) => h.intensity);
+        const payload = {
+          version: 1,
+          mode: st0.mode,
+          difficulty: st0.difficulty,
+          pacing: st0.pacing,
+          speed: st0.speed,
+          dayIndex,
+          snapshot: latest,
+          trend: { direction, intensityNow: latest.intensity, intensities7d },
+          knobs: ai0.knobs,
+          params: {
+            beta: st0.params.beta,
+            sigma: st0.params.sigma,
+            muBase: st0.params.muBase,
+            variantTransMult: st0.params.variantTransMult,
+          },
+        } as const;
+
+        set((st) => {
+          if (!st.aiDirector) st.aiDirector = createAiDirectorState(nowMs, true);
+          st.aiDirector.pending = true;
+          st.aiDirector.error = null;
+          st.aiDirector.lastRequestAtMs = nowMs;
+          if (st.aiDirector.dailyUsage.dateKey !== dk) st.aiDirector.dailyUsage = { dateKey: dk, count: 0 };
+          st.aiDirector.dailyUsage.count += 1;
+        });
+
+        try {
+          const res = await fetch('/api/ai-director', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          const text = await res.text();
+          let json: any = null;
+          try { json = JSON.parse(text); } catch { json = null; }
+          if (!res.ok) {
+            const msg = (json && typeof json.error === 'string') ? json.error : `HTTP ${res.status}`;
+            const e = new Error(msg) as any;
+            e.status = res.status;
+            throw e;
+          }
+          if (!json) {
+            const e = new Error('AI director returned non-JSON response') as any;
+            e.status = 502;
+            throw e;
+          }
+
+          const decision = normalizeAiDecision(json?.decision, st0.mode);
+          if (!decision) throw new Error('Invalid AI director response');
+
+          set((st) => {
+            const ai = st.aiDirector;
+            if (!ai) return;
+            // If the player disabled the director while this request was in-flight,
+            // just clear the pending state and do not apply changes.
+            if (!ai.enabled || st.pathogenType !== 'virus') {
+              ai.pending = false;
+              return;
+            }
+
+            const deltas = decision.knobs || {};
+            const parts: string[] = [];
+
+            if (typeof deltas.variantTransMultMul === 'number') {
+              ai.knobs.variantTransMultMul = clampAiKnob(ai.knobs.variantTransMultMul * deltas.variantTransMultMul);
+              if (deltas.variantTransMultMul !== 1) parts.push(`${fmtPctDelta(deltas.variantTransMultMul)} transmissibility`);
+            }
+            if (typeof deltas.sigmaMul === 'number') {
+              ai.knobs.sigmaMul = clampAiKnob(ai.knobs.sigmaMul * deltas.sigmaMul);
+              if (deltas.sigmaMul !== 1) parts.push(`${fmtPctDelta(deltas.sigmaMul)} incubation speed`);
+            }
+            if (typeof deltas.muBaseMul === 'number') {
+              ai.knobs.muBaseMul = clampAiKnob(ai.knobs.muBaseMul * deltas.muBaseMul);
+              if (deltas.muBaseMul !== 1) parts.push(`${fmtPctDelta(deltas.muBaseMul)} lethality`);
+            }
+
+            ai.lastEvalDay = dayIndex;
+            ai.pending = false;
+            ai.error = null;
+
+            const dir = computeDirection(ai.history || []);
+            const core = parts.length ? parts.join(', ') : 'hold';
+            const note = decision.note ? ` — ${decision.note}` : '';
+            st.events.unshift(`AI variant drift: ${core} (pressure ${dir})${note}`);
+            while (st.events.length > MAX_EVENTS) st.events.pop();
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          const status = (err && typeof err === 'object' && 'status' in (err as any) && typeof (err as any).status === 'number')
+            ? (err as any).status as number
+            : null;
+          set((st) => {
+            if (!st.aiDirector) st.aiDirector = createAiDirectorState(Date.now(), false);
+            st.aiDirector.pending = false;
+            if (status === 404) {
+              st.aiDirector.enabled = false;
+              st.aiDirector.knobs = { ...AI_DEFAULT_KNOBS };
+              st.aiDirector.error = 'API endpoint /api/ai-director not found. Run `pnpm dev` (Node proxy) instead of a Vite-only server.';
+              st.events.unshift(`AI director disabled: ${st.aiDirector.error}`);
+            } else {
+              st.aiDirector.error = msg;
+              st.events.unshift(`AI director unavailable: ${msg}`);
+            }
+            while (st.events.length > MAX_EVENTS) st.events.pop();
+          });
+        }
+      },
       bankPickup: (type, amount, ttlMs = 12_000) => set((st) => {
         if (st.bankedPickups.length >= MAX_BANKED_PICKUPS) {
           // drop oldest to preserve "grace buffer" feel without infinite stacking
@@ -604,6 +907,16 @@ export const useGameStore = create<GameStore>()(
             let fungusBurstChanceMul = 1;
             let fungusBurstDurationAdd = 0;
             let bioweaponVolatilityRateMul = 1;
+            let hospCapacityMul = 1;
+            let travelReductionMul = 1;
+            let detectionDelayAdd = 0;
+            let mortalityHospMul = 1;
+            let dnaPerDeathAdd = 0;
+            let exposedDurationMul = 1;
+            let opsPerDayAdd = 0;
+            let quarantineEffMul = 1;
+            let reinfectionRate = 0;
+            let asymptomaticSpreadMul = 1;
             for (const u of Object.values(state.upgrades)) {
               if (!u.purchased) continue;
               const e = u.effects;
@@ -616,26 +929,44 @@ export const useGameStore = create<GameStore>()(
               if (e.importationMul) importMulUp *= e.importationMul;
               if (e.policyResistMul) policyResistMulUp *= e.policyResistMul;
               if (e.dnaRateAdd) dnaRate += e.dnaRateAdd;
-              if ((e as any).cureRateMul) cureRateMul *= (e as any).cureRateMul;
-              if ((e as any).cureAddPerDay) cureAddPerDay += (e as any).cureAddPerDay;
-              if ((e as any).symFracMul) symFracMulUp *= (e as any).symFracMul;
-              if ((e as any).symContactMul) symContactMulUp2 *= (e as any).symContactMul;
-              if ((e as any).severityMobilityMul) severityMobilityMulUp *= (e as any).severityMobilityMul;
-              if ((e as any).mutationDebtDecayAdd) mutationDebtDecayAdd += (e as any).mutationDebtDecayAdd;
-              if ((e as any).mutationChanceMul) mutationChanceMul *= (e as any).mutationChanceMul;
-              if ((e as any).resistanceDecayAdd) resistanceDecayAdd += (e as any).resistanceDecayAdd;
-              if ((e as any).resistancePressureMul) resistancePressureMul *= (e as any).resistancePressureMul;
-              if ((e as any).fungusBurstChanceMul) fungusBurstChanceMul *= (e as any).fungusBurstChanceMul;
-              if ((e as any).fungusBurstDurationAdd) fungusBurstDurationAdd += (e as any).fungusBurstDurationAdd;
-              if ((e as any).bioweaponVolatilityRateMul) bioweaponVolatilityRateMul *= (e as any).bioweaponVolatilityRateMul;
+              if (e.cureRateMul) cureRateMul *= e.cureRateMul;
+              if (e.cureAddPerDay) cureAddPerDay += e.cureAddPerDay;
+              if (e.symFracMul) symFracMulUp *= e.symFracMul;
+              if (e.symContactMul) symContactMulUp2 *= e.symContactMul;
+              if (e.severityMobilityMul) severityMobilityMulUp *= e.severityMobilityMul;
+              if (e.mutationDebtDecayAdd) mutationDebtDecayAdd += e.mutationDebtDecayAdd;
+              if (e.mutationChanceMul) mutationChanceMul *= e.mutationChanceMul;
+              if (e.resistanceDecayAdd) resistanceDecayAdd += e.resistanceDecayAdd;
+              if (e.resistancePressureMul) resistancePressureMul *= e.resistancePressureMul;
+              if (e.fungusBurstChanceMul) fungusBurstChanceMul *= e.fungusBurstChanceMul;
+              if (e.fungusBurstDurationAdd) fungusBurstDurationAdd += e.fungusBurstDurationAdd;
+              if (e.bioweaponVolatilityRateMul) bioweaponVolatilityRateMul *= e.bioweaponVolatilityRateMul;
+              if (e.hospCapacityMul) hospCapacityMul *= e.hospCapacityMul;
+              if (e.travelReductionMul) travelReductionMul *= e.travelReductionMul;
+              if (e.detectionDelayAdd) detectionDelayAdd += e.detectionDelayAdd;
+              if (e.mortalityHospMul) mortalityHospMul *= e.mortalityHospMul;
+              if (e.dnaPerDeathAdd) dnaPerDeathAdd += e.dnaPerDeathAdd;
+              if (e.exposedDurationMul) exposedDurationMul *= e.exposedDurationMul;
+              if (e.opsPerDayAdd) opsPerDayAdd += e.opsPerDayAdd;
+              if (e.quarantineEffMul) quarantineEffMul *= e.quarantineEffMul;
+              if (e.reinfectionRate) reinfectionRate += e.reinfectionRate;
+              if (e.asymptomaticSpreadMul) asymptomaticSpreadMul *= e.asymptomaticSpreadMul;
             }
             const p = state.params as any;
             // seasonality
             const season = 1 + p.seasonalityAmp * Math.cos(2 * Math.PI * ((state.day - p.seasonalityPhase) / 365));
-            const capPerPerson = (p.hospCapacityPerK / 1000);
+            const hospResp = HOSP_RESPONSE_TIERS[state.hospResponseTier];
+            const capPerPersonBase = (p.hospCapacityPerK / 1000) * hospCapacityMul;
             const symFracEff = Math.max(0, Math.min(1, p.symFrac * symFracMulUp));
             const symContactEff = Math.max(0, Math.min(1, p.symContactMul * symContactMulUp2));
             const sevMobEff = Math.max(0, p.severityMobilityFactor * severityMobilityMulUp);
+
+            // AI Evolution Director knobs (virus-only, subtle multipliers).
+            const ai = state.aiDirector;
+            const aiOn = Boolean(ai?.enabled && state.pathogenType === 'virus');
+            const aiVariantMul = aiOn ? ai!.knobs.variantTransMultMul : 1;
+            const aiSigmaMul = aiOn ? ai!.knobs.sigmaMul : 1;
+            const aiMuMul = aiOn ? ai!.knobs.muBaseMul : 1;
 
             // Pathogen-type mechanics.
             const isFungusBurst = state.pathogenType === 'fungus' && state.fungusBurstDaysLeft > 0;
@@ -661,25 +992,26 @@ export const useGameStore = create<GameStore>()(
               const symPrev = symFracEff * (c.I / N);
               const symContact = 1 - symPrev * (1 - symContactEff);
               const contactMul = policyContactMul * symContact;
-              const betaEff = p.beta * betaMulUp * p.variantTransMult * season * contactMul * fungusBetaMul * bioweaponBetaMul;
-              const sigma = p.sigma * sigmaMulUp;
+              const betaEff = p.beta * betaMulUp * (p.variantTransMult * aiVariantMul) * season * contactMul * fungusBetaMul * bioweaponBetaMul * (1 + (asymptomaticSpreadMul - 1) * (1 - symFracEff));
+              const sigma = (p.sigma * sigmaMulUp * aiSigmaMul) / Math.max(0.1, exposedDurationMul);
               const gammaRec = p.gammaRec * gammaRecMulUp;
-              let mu = p.muBase * muMulUp * bioweaponMuMul;
+              let mu = p.muBase * muMulUp * aiMuMul * bioweaponMuMul;
 
               // Hospital flows
               const symptomaticI = symFracEff * c.I;
               // Admissions should reflect current symptomatic burden; do not gate by early-game ramp
               const newHosp = (p.hospRate * hospRateMulUp * bioweaponHospMul) * symptomaticI * dtDays;
-              const discharges = Math.min(c.H, (p.dischargeRate * dischargeMulUp) * c.H * dtDays);
+              const discharges = Math.min(c.H, (p.dischargeRate * dischargeMulUp * hospResp.dischargeMul) * c.H * dtDays);
               c.H += newHosp - discharges;
               c.R += discharges;
 
               // hospital strain effects
-              const cap = capPerPerson * N;
+              const cap = capPerPersonBase * hospResp.capMul * N;
               const strain = cap > 0 ? Math.min(2, Math.max(0, c.H / cap)) : 0;
               if (strain > 1) {
                 mu *= 1 + (strain - 1) * 2;
               }
+              mu *= mortalityHospMul;
 
               // infection pressure + importations
               const lambda = betaEff * (c.I / N);
@@ -693,6 +1025,19 @@ export const useGameStore = create<GameStore>()(
               c.I += newI - rec - deaths;
               c.R += rec;
               c.D += deaths;
+
+              // Reinfection: recovered -> susceptible
+              const clampedReinfection = Math.min(0.01, reinfectionRate);
+              if (clampedReinfection > 0) {
+                const reinfected = Math.min(c.R, c.R * clampedReinfection * dtDays);
+                c.R -= reinfected;
+                c.S += reinfected;
+              }
+
+              // Death dividend: bonus DNA per death
+              if (dnaPerDeathAdd > 0 && deaths > 0) {
+                state.dna += dnaPerDeathAdd * deaths;
+              }
             }
 
             // mobility between boroughs
@@ -709,8 +1054,8 @@ export const useGameStore = create<GameStore>()(
               if (!from || !to) continue;
               const cordonFrom = state.cordonDaysLeft?.[edge.from] || 0;
               const cordonTo = state.cordonDaysLeft?.[edge.to] || 0;
-              const cordonMul = (cordonFrom > 0 || cordonTo > 0) ? 0.15 : 1;
-              const travelToday = edge.daily * p.mobilityScale * fungusMobilityMul * cordonMul * dtDays;
+              const cordonMul = (cordonFrom > 0 || cordonTo > 0) ? Math.max(0.02, 0.15 / quarantineEffMul) : 1;
+              const travelToday = edge.daily * p.mobilityScale * fungusMobilityMul * cordonMul * travelReductionMul * dtDays;
               if (travelToday <= 0) continue;
               const baseTravel = from.policy === 'open' ? 1.0 : from.policy === 'advisory' ? 0.6 : from.policy === 'restrictions' ? 0.3 : 0.1;
               let fromMul = 1 - (1 - baseTravel) / policyResistMulUp;
@@ -736,7 +1081,7 @@ export const useGameStore = create<GameStore>()(
 
             // accrue points
             const earlyBoost = state.day < (state.params.earlyPointBoostDays ?? 0) ? (state.params.earlyPointBoostMul ?? 1) : 1;
-            state.dna += dnaRate * dtDays * earlyBoost;
+            state.dna += (dnaRate + opsPerDayAdd) * dtDays * earlyBoost;
 
             // cure progress model (0..100)
             const totalPop = Object.values(state.countries).reduce((s, c) => s + c.pop, 0);
@@ -775,6 +1120,62 @@ export const useGameStore = create<GameStore>()(
             const prevDay = Math.floor((state.t - stepMs) / state.msPerDay);
             const nowDay = Math.floor(state.t / state.msPerDay);
             if (nowDay !== prevDay) {
+              // Citywide hospital response: escalate capacity/turnover when demand breaches capacity.
+              // This keeps the "story curve" (peaks/valleys) from spiraling into nonsensical overload.
+              {
+                let maxLoadBase = 0;
+                for (const c of Object.values(state.countries)) {
+                  const N = Math.max(1, c.pop);
+                  const capBase = capPerPersonBase * N;
+                  const loadBase = capBase > 0 ? (c.H / capBase) : 0;
+                  if (loadBase > maxLoadBase) maxLoadBase = loadBase;
+                }
+                const curTier = state.hospResponseTier;
+                const curMul = HOSP_RESPONSE_TIERS[curTier].capMul;
+                const maxLoadEff = curMul > 0 ? (maxLoadBase / curMul) : maxLoadBase;
+                const nextTier = nextHospResponseTier(curTier, maxLoadBase, maxLoadEff);
+                if (nextTier !== curTier) {
+                  state.hospResponseTier = nextTier;
+                  const label = HOSP_RESPONSE_TIERS[nextTier].label;
+                  if (nextTier > curTier) {
+                    state.events.unshift(`Hospital response escalates: ${label}`);
+                  } else {
+                    state.events.unshift(`Hospital pressure eases: ${label}`);
+                  }
+
+                  // If the AI director is enabled, apply a one-time small "emergency brake"
+                  // on escalations so the virus doesn't feel oblivious to system collapse.
+                  const ai = state.aiDirector;
+                  if (ai?.enabled && state.pathogenType === 'virus' && nextTier > curTier) {
+                    const isController = state.mode === 'controller';
+                    const txBrake = nextTier >= 3 ? 0.97 : nextTier >= 2 ? 0.98 : 0.99;
+                    const incBrake = nextTier >= 3 ? 0.98 : 0.99;
+                    const muBrake = nextTier >= 3 ? 0.98 : 0.99;
+                    ai.knobs.variantTransMultMul = clampAiKnob(ai.knobs.variantTransMultMul * txBrake);
+                    ai.knobs.sigmaMul = clampAiKnob(ai.knobs.sigmaMul * incBrake);
+                    if (isController) {
+                      // Controller mode: never increase lethality; braking is always allowed.
+                      ai.knobs.muBaseMul = clampAiKnob(ai.knobs.muBaseMul * muBrake);
+                    } else {
+                      ai.knobs.muBaseMul = clampAiKnob(ai.knobs.muBaseMul * muBrake);
+                    }
+                    state.events.unshift(`AI director override: ${fmtPctDelta(txBrake)} transmissibility (hospital overflow)`);
+                  }
+                }
+              }
+
+              // AI director: store a compact daily snapshot and decay drift toward neutral.
+              if (state.pathogenType === 'virus') {
+                if (!state.aiDirector) state.aiDirector = createAiDirectorState(Date.now(), false);
+                const snap = computeVirusDirectorSnapshot(state);
+                state.aiDirector.history.push(snap);
+                while (state.aiDirector.history.length > AI_DIRECTOR_CFG.historyMaxDays) state.aiDirector.history.shift();
+                const k = state.aiDirector.knobs;
+                k.variantTransMultMul = clampAiKnob(decayTowardOne(k.variantTransMultMul, AI_DIRECTOR_CFG.dailyDecayTowardNeutral));
+                k.sigmaMul = clampAiKnob(decayTowardOne(k.sigmaMul, AI_DIRECTOR_CFG.dailyDecayTowardNeutral));
+                k.muBaseMul = clampAiKnob(decayTowardOne(k.muBaseMul, AI_DIRECTOR_CFG.dailyDecayTowardNeutral));
+              }
+
               // Countdown transient systems once per day.
               for (const k of Object.keys(state.cordonDaysLeft || {})) {
                 const days = state.cordonDaysLeft[k as any] || 0;
@@ -841,12 +1242,14 @@ export const useGameStore = create<GameStore>()(
                 let policyHeadline: string | null = null;
                 for (const c of Object.values(state.countries)) {
                   const iPer100k = (c.I / Math.max(1, c.pop)) * 100_000;
-                  const cap = (state.params.hospCapacityPerK / 1000) * Math.max(1, c.pop);
+                  const cap = capPerPersonBase * HOSP_RESPONSE_TIERS[state.hospResponseTier].capMul * Math.max(1, c.pop);
                   const load = cap > 0 ? (c.H / cap) : 0;
+                  // Detection delay shifts policy trigger thresholds (positive = harder to detect = architect benefit)
+                  const ddMul = 1 + detectionDelayAdd * 0.12; // each day of delay raises thresholds ~12%
                   let desired: Country['policy'] = 'open';
-                  if (load >= 1.15 || iPer100k >= 650) desired = 'lockdown';
-                  else if (load >= 0.85 || iPer100k >= 260) desired = 'restrictions';
-                  else if (iPer100k >= 90) desired = 'advisory';
+                  if (load >= 1.15 || iPer100k >= 650 * ddMul) desired = 'lockdown';
+                  else if (load >= 0.85 || iPer100k >= 260 * ddMul) desired = 'restrictions';
+                  else if (iPer100k >= 90 * ddMul) desired = 'advisory';
 
                   const cur = c.policy;
                   if (rank[desired] > rank[cur]) {
@@ -904,6 +1307,14 @@ export const useGameStore = create<GameStore>()(
         if (steps >= maxStepsPerTick) {
           // Drop the remainder to avoid spiral-of-death when the tab was inactive.
           __simAccMs = 0;
+        }
+
+        // After sim integration, allow the AI director to evaluate and (rarely)
+        // request an adjustment. This is intentionally fire-and-forget.
+        const stAfter = get();
+        const ai = stAfter.aiDirector;
+        if (ai?.enabled && stAfter.pathogenType === 'virus' && !ai.pending) {
+          void stAfter.actions.requestAiDirectorDecision();
         }
       },
       purchaseUpgrade: (id) => set((st) => {
@@ -969,7 +1380,7 @@ export const useGameStore = create<GameStore>()(
         let days = 4;
         for (const u of Object.values(st.upgrades)) {
           if (!u.purchased) continue;
-          const e: any = u.effects;
+          const e = u.effects;
           if (typeof e.cordonCostDelta === 'number') cost += e.cordonCostDelta;
           if (typeof e.cordonDaysAdd === 'number') days += e.cordonDaysAdd;
         }
@@ -995,6 +1406,7 @@ export const useGameStore = create<GameStore>()(
           dna: st.dna,
           mode: st.mode,
           pathogenType: st.pathogenType,
+          hospResponseTier: st.hospResponseTier,
           mutationDebt: st.mutationDebt,
           antibioticResistance: st.antibioticResistance,
           fungusBurstDaysLeft: st.fungusBurstDaysLeft,
@@ -1008,6 +1420,7 @@ export const useGameStore = create<GameStore>()(
           selectedCountryId: st.selectedCountryId,
           params: st.params,
           upgrades: st.upgrades,
+          aiDirector: st.aiDirector ? { ...st.aiDirector, pending: false } : undefined,
           events: st.events.slice(0, 20),
           version: 1,
         };
@@ -1034,6 +1447,30 @@ export const useGameStore = create<GameStore>()(
             st.events = Array.isArray(snap.events) ? snap.events : st.events;
             st.mode = snap.mode ?? st.mode;
             st.pathogenType = snap.pathogenType ?? st.pathogenType;
+            {
+              const t = (snap as any).hospResponseTier;
+              st.hospResponseTier = (t === 0 || t === 1 || t === 2 || t === 3) ? (t as HospResponseTier) : 0;
+            }
+            // AI director: best-effort restore with safe defaults.
+            if (snap.aiDirector && typeof snap.aiDirector === 'object') {
+              const incoming = snap.aiDirector as Partial<AiDirectorState>;
+              const base = createAiDirectorState(Date.now(), false);
+              const incomingKnobs = (incoming.knobs && typeof incoming.knobs === 'object') ? incoming.knobs : undefined;
+              const incomingHistory = Array.isArray(incoming.history) ? incoming.history : [];
+              st.aiDirector = {
+                ...base,
+                ...incoming,
+                pending: false,
+                knobs: { ...AI_DEFAULT_KNOBS, ...(incomingKnobs || {}) },
+                history: incomingHistory,
+              };
+            }
+            if (!st.aiDirector) st.aiDirector = createAiDirectorState(Date.now(), false);
+            if (st.pathogenType !== 'virus') {
+              st.aiDirector.enabled = false;
+              st.aiDirector.pending = false;
+              st.aiDirector.knobs = { ...AI_DEFAULT_KNOBS };
+            }
             st.mutationDebt = snap.mutationDebt ?? st.mutationDebt;
             st.antibioticResistance = snap.antibioticResistance ?? st.antibioticResistance;
             st.fungusBurstDaysLeft = snap.fungusBurstDaysLeft ?? st.fungusBurstDaysLeft;
@@ -1061,6 +1498,9 @@ export const useGameStore = create<GameStore>()(
         st.selectedCountryId = null;
         st.mode = mode;
         st.pathogenType = (opts?.pathogenType ?? 'virus') as PathogenType;
+        st.hospResponseTier = 0;
+        st.aiDirector = createAiDirectorState(Date.now(), Boolean(opts?.aiDirectorEnabled && st.pathogenType === 'virus'));
+        if (st.aiDirector.enabled) st.aiDirector.lastEvalDay = 0;
         st.mutationDebt = 0;
         st.antibioticResistance = 0;
         st.fungusBurstDaysLeft = 0;

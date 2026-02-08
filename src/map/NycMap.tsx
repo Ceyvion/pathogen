@@ -97,6 +97,12 @@ export function NycMap() {
   const effectsRef = useRef<any[]>([]);
   const uiObstaclesRef = useRef<Array<{ left: number; top: number; right: number; bottom: number }>>([]);
   const lastUiObstaclesUpdateRef = useRef<number>(0);
+  const infectionFxRef = useRef<{
+    nextId: number;
+    speckles: Array<{ id: number; ll: [number, number]; born: number; ttl: number; a: number; r: number }>;
+    dust: Array<{ id: number; ll: [number, number]; born: number; ttl: number; a: number; r: number }>;
+    deaths: Array<{ id: number; ll: [number, number]; born: number; ttl: number; a: number; r: number }>;
+  }>({ nextId: 1, speckles: [], dust: [], deaths: [] });
   // Recreate MapLibre map on theme changes so basemap style matches UI theme.
   const theme = useUiStore((s) => s.theme);
   const cameraStateRef = useRef<{ center: [number, number]; zoom: number; bearing: number; pitch: number } | null>(null);
@@ -862,101 +868,168 @@ export function NycMap() {
 
         // Infection speckles (neighborhood blots) for creeping feel at low prevalence
         elapsedSinceBlot += dt;
-        let speckleLayer: any = null;
-        let dustLayer: any = null;
-        let deathMaskLayer: any = null;
+        const fx = infectionFxRef.current;
+        const smoothstep = (edge0: number, edge1: number, x: number) => {
+          const t = Math.max(0, Math.min(1, (x - edge0) / Math.max(1e-6, edge1 - edge0)));
+          return t * t * (3 - 2 * t);
+        };
+        const prune = <T extends { born: number; ttl: number }>(arr: T[]): T[] =>
+          arr.filter((p) => now - p.born < p.ttl);
+
+        fx.speckles = prune(fx.speckles);
+        fx.dust = prune(fx.dust);
+        fx.deaths = prune(fx.deaths);
+
         if (elapsedSinceBlot >= 200) {
           elapsedSinceBlot = 0;
-          const speckles: Array<{ ll: [number, number]; alpha: number; r: number }> = [];
-          const dust: Array<{ ll: [number, number]; alpha: number; r: number }> = [];
-          const deaths: Array<{ ll: [number, number]; alpha: number; r: number }> = [];
           try {
             for (const [boroKey, c] of Object.entries(state.countries)) {
               const N = Math.max(1, (c as any).pop || 1);
               const iRate = Math.max(0, (c as any).I / N);
               const dRate = Math.max(0, (c as any).D / N);
               const hoodList = hoodNodesByBoroRef.current[boroKey] || [];
-              if (!hoodList.length || iRate <= 0) continue;
-              const norm = Math.min(1, iRate / 0.005); // scale up to 0.5%
-              const count = Math.max(1, Math.floor(norm * 16));
-              for (let i = 0; i < count; i++) {
-                const pick = hoodList[Math.floor(Math.random() * hoodList.length)];
-                const coords = pick?.geometry?.coordinates;
-                if (!Array.isArray(coords) || coords.length < 2) continue;
-                const baseA = 28 + Math.floor(norm * 110);
-                const baseR = 6 + Math.floor(norm * 24);
-                speckles.push({ ll: coords as [number, number], alpha: baseA, r: baseR });
+              if (!hoodList.length) continue;
+
+              // Scale up to ~0.5% prevalence.
+              const norm = Math.min(1, iRate / 0.005);
+
+              if (iRate > 0) {
+                // Speckles persist + fade instead of blinking on/off every update.
+                const speckCount = Math.max(1, Math.floor(norm * 2));
+                for (let i = 0; i < speckCount; i++) {
+                  const pick = hoodList[Math.floor(Math.random() * hoodList.length)];
+                  const coords = pick?.geometry?.coordinates;
+                  if (!Array.isArray(coords) || coords.length < 2) continue;
+                  const baseA = 28 + Math.floor(norm * 110);
+                  const baseR = 6 + Math.floor(norm * 24);
+                  fx.speckles.push({
+                    id: fx.nextId++,
+                    ll: coords as [number, number],
+                    born: now,
+                    ttl: 1300 + Math.random() * 1400,
+                    a: baseA,
+                    r: baseR,
+                  });
+                }
+
+                // Atmospheric dust around centroid.
+                const center = centroidRef.current[boroKey] || NYC_CENTER;
+                const dustCount = Math.max(1, Math.floor(norm * 2));
+                for (let i = 0; i < dustCount; i++) {
+                  const jitterLon = (Math.random() - 0.5) * 0.01;
+                  const jitterLat = (Math.random() - 0.5) * 0.01;
+                  const a = 10 + Math.floor(norm * 35);
+                  const r = 3 + Math.floor(norm * 5);
+                  fx.dust.push({
+                    id: fx.nextId++,
+                    ll: [center[0] + jitterLon, center[1] + jitterLat] as [number, number],
+                    born: now,
+                    ttl: 2200 + Math.random() * 2200,
+                    a,
+                    r,
+                  });
+                }
               }
-              // atmospheric dust around centroid
-              const center = centroidRef.current[boroKey] || NYC_CENTER;
-              const dustCount = Math.max(2, Math.floor(norm * 22));
-              for (let i=0; i<dustCount; i++) {
-                const jitterLon = (Math.random() - 0.5) * 0.01; // ~small
-                const jitterLat = (Math.random() - 0.5) * 0.01;
-                const a = 10 + Math.floor(norm * 35);
-                const r = 3 + Math.floor(norm * 5);
-                dust.push({ ll: [center[0] + jitterLon, center[1] + jitterLat] as [number, number], alpha: a, r });
-              }
-              // darken high-death areas with soft mask
+
+              // Darken high-death areas with a soft mask.
               if (dRate > 0) {
                 const normD = Math.min(1, dRate / 0.0008);
-                const dCount = Math.max(1, Math.floor(normD * 12));
-                for (let i=0; i<dCount; i++) {
+                const dCount = Math.max(1, Math.floor(normD * 2));
+                for (let i = 0; i < dCount; i++) {
                   const pick = hoodList[Math.floor(Math.random() * hoodList.length)];
                   const coords = pick?.geometry?.coordinates;
                   if (!Array.isArray(coords) || coords.length < 2) continue;
                   const a = 40 + Math.floor(normD * 120);
                   const r = 10 + Math.floor(normD * 28);
-                  deaths.push({ ll: coords as [number, number], alpha: a, r });
+                  fx.deaths.push({
+                    id: fx.nextId++,
+                    ll: coords as [number, number],
+                    born: now,
+                    ttl: 2600 + Math.random() * 2600,
+                    a,
+                    r,
+                  });
                 }
               }
             }
           } catch {}
-          speckleLayer = new ScatterplotLayer({
-            id: 'infection-speckles',
-            data: speckles,
-            getPosition: (d: any) => d.ll,
-            getFillColor: (d: any) => [180, 20, 20, d.alpha],
-            getRadius: (d: any) => d.r,
-            radiusUnits: 'pixels',
-            stroked: false,
-            pickable: false,
-            parameters: {
-              // additive blending to make dots bloom together
-              blend: true,
-              blendFunc: [GL.SRC_ALPHA, GL.ONE, GL.ONE, GL.ONE_MINUS_SRC_ALPHA],
-              blendEquation: GL.FUNC_ADD,
-            } as any,
-            updateTriggers: { data: performance.now() },
-          }) as any;
-          dustLayer = new ScatterplotLayer({
-            id: 'atmo-dust',
-            data: dust,
-            getPosition: (d: any) => d.ll,
-            getFillColor: (d: any) => [160, 80, 40, d.alpha],
-            getRadius: (d: any) => d.r,
-            radiusUnits: 'pixels',
-            stroked: false,
-            pickable: false,
-            parameters: {
-              blend: true,
-              blendFunc: [GL.SRC_ALPHA, GL.ONE, GL.ONE, GL.ONE_MINUS_SRC_ALPHA],
-              blendEquation: GL.FUNC_ADD,
-            } as any,
-            updateTriggers: { data: performance.now() },
-          }) as any;
-          deathMaskLayer = new ScatterplotLayer({
-            id: 'death-mask',
-            data: deaths,
-            getPosition: (d: any) => d.ll,
-            getFillColor: (d: any) => [15, 22, 15, d.alpha],
-            getRadius: (d: any) => d.r,
-            radiusUnits: 'pixels',
-            stroked: false,
-            pickable: false,
-            updateTriggers: { data: performance.now() },
-          }) as any;
+
+          // Hard caps (defensive): never allow unbounded growth.
+          if (fx.speckles.length > 700) fx.speckles.splice(0, fx.speckles.length - 700);
+          if (fx.dust.length > 700) fx.dust.splice(0, fx.dust.length - 700);
+          if (fx.deaths.length > 520) fx.deaths.splice(0, fx.deaths.length - 520);
         }
+
+        const fadeAlpha = (born: number, ttl: number, baseA: number) => {
+          const t = (now - born) / Math.max(1, ttl);
+          const fadeIn = smoothstep(0.0, 0.14, t);
+          const fadeOut = 1 - smoothstep(0.74, 1.0, t);
+          const k = Math.max(0, Math.min(1, fadeIn * fadeOut));
+          return Math.max(0, Math.min(255, Math.round(baseA * k)));
+        };
+
+        const specklesNow = fx.speckles
+          .map((p) => ({ ll: p.ll, alpha: fadeAlpha(p.born, p.ttl, p.a), r: p.r }))
+          .filter((p) => p.alpha > 0);
+        const dustNow = fx.dust
+          .map((p) => ({ ll: p.ll, alpha: fadeAlpha(p.born, p.ttl, p.a), r: p.r }))
+          .filter((p) => p.alpha > 0);
+        const deathsNow = fx.deaths
+          .map((p) => ({ ll: p.ll, alpha: fadeAlpha(p.born, p.ttl, p.a), r: p.r }))
+          .filter((p) => p.alpha > 0);
+
+        const speckleLayer = specklesNow.length ? (new ScatterplotLayer({
+          id: 'infection-speckles',
+          data: specklesNow,
+          getPosition: (d: any) => d.ll,
+          getFillColor: (d: any) => [180, 20, 20, d.alpha],
+          getRadius: (d: any) => d.r,
+          radiusUnits: 'pixels',
+          stroked: false,
+          pickable: false,
+          parameters: {
+            // additive blending to make dots bloom together
+            blend: true,
+            blendFunc: [GL.SRC_ALPHA, GL.ONE, GL.ONE, GL.ONE_MINUS_SRC_ALPHA],
+            blendEquation: GL.FUNC_ADD,
+            // Never depth-test against MapLibre (3D buildings) to avoid shimmering/flicker.
+            depthTest: false,
+            depthMask: false,
+          } as any,
+        }) as any) : null;
+
+        const dustLayer = dustNow.length ? (new ScatterplotLayer({
+          id: 'atmo-dust',
+          data: dustNow,
+          getPosition: (d: any) => d.ll,
+          getFillColor: (d: any) => [160, 80, 40, d.alpha],
+          getRadius: (d: any) => d.r,
+          radiusUnits: 'pixels',
+          stroked: false,
+          pickable: false,
+          parameters: {
+            blend: true,
+            blendFunc: [GL.SRC_ALPHA, GL.ONE, GL.ONE, GL.ONE_MINUS_SRC_ALPHA],
+            blendEquation: GL.FUNC_ADD,
+            depthTest: false,
+            depthMask: false,
+          } as any,
+        }) as any) : null;
+
+        const deathMaskLayer = deathsNow.length ? (new ScatterplotLayer({
+          id: 'death-mask',
+          data: deathsNow,
+          getPosition: (d: any) => d.ll,
+          getFillColor: (d: any) => [15, 22, 15, d.alpha],
+          getRadius: (d: any) => d.r,
+          radiusUnits: 'pixels',
+          stroked: false,
+          pickable: false,
+          parameters: {
+            depthTest: false,
+            depthMask: false,
+          } as any,
+        }) as any) : null;
 
         // Render deck layers
         const t = now;

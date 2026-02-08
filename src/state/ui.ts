@@ -4,6 +4,10 @@ import type { GameMode, GeneId, Country, PathogenType } from './types';
 
 type UiState = {
   scene: 'boot' | 'title' | 'setup' | 'game';
+  // When true, the app should attempt to hydrate game state from localStorage
+  // and jump directly into gameplay (used for browser refresh / reload continuity).
+  resumeOnLoad: boolean;
+  clearResumeOnLoad: () => void;
   theme: 'dark' | 'light';
   showStats: boolean;
   showUpgrades: boolean;
@@ -56,6 +60,15 @@ type UiState = {
   }>) => void;
 };
 
+const initialScene = (() => {
+  try {
+    const last = localStorage.getItem('sceneV1');
+    const hasSave = Boolean(localStorage.getItem('gameSave'));
+    if (last === 'game' && hasSave) return { scene: 'game' as const, resumeOnLoad: true };
+  } catch {}
+  return { scene: 'boot' as const, resumeOnLoad: false };
+})();
+
 const initialCinematic = (() => { try { return localStorage.getItem('cinematicV1') !== '0'; } catch { return true; } })();
 const initialPreset = (() => { try { return (localStorage.getItem('presetV1') as any) || 'default'; } catch { return 'default'; } })();
 const initialTheme = (() => {
@@ -75,7 +88,9 @@ try { if (typeof document !== 'undefined') document.documentElement.setAttribute
 try { if (typeof document !== 'undefined') document.documentElement.setAttribute('data-theme', initialTheme); } catch {}
 
 export const useUiStore = create<UiState>((set) => ({
-  scene: 'boot',
+  scene: initialScene.scene,
+  resumeOnLoad: initialScene.resumeOnLoad,
+  clearResumeOnLoad: () => set(() => ({ resumeOnLoad: false })),
   theme: initialTheme,
   showStats: true,
   showUpgrades: false,
@@ -105,13 +120,25 @@ export const useUiStore = create<UiState>((set) => ({
     try { localStorage.setItem('theme', next); } catch {}
     return { theme: next } as any;
   }),
-  toTitle: () => set(() => ({ scene: 'title', pendingMode: null, pendingStoryId: undefined })),
-  toGame: () => set(() => ({ scene: 'game' })),
-  startMode: (m) => set(() => ({ scene: 'setup', pendingMode: m })),
+  toTitle: () => set(() => {
+    try { localStorage.setItem('sceneV1', 'title'); } catch {}
+    return { scene: 'title', pendingMode: null, pendingStoryId: undefined } as any;
+  }),
+  toGame: () => set(() => {
+    try { localStorage.setItem('sceneV1', 'game'); } catch {}
+    return { scene: 'game' } as any;
+  }),
+  startMode: (m) => set(() => {
+    try { localStorage.setItem('sceneV1', 'setup'); } catch {}
+    return { scene: 'setup', pendingMode: m } as any;
+  }),
   pendingMode: null,
   pendingStoryId: undefined,
   setPendingStory: (id) => set(() => ({ pendingStoryId: id })),
-  toSetup: (m, storyId) => set(() => ({ scene: 'setup', pendingMode: m, pendingStoryId: storyId })),
+  toSetup: (m, storyId) => set(() => {
+    try { localStorage.setItem('sceneV1', 'setup'); } catch {}
+    return { scene: 'setup', pendingMode: m, pendingStoryId: storyId } as any;
+  }),
   setCinematic: (v) => set(() => { try { localStorage.setItem('cinematicV1', v ? '1' : '0'); } catch {}; return { cinematic: v } as any; }),
   setup: { difficulty: 'normal', genes: [], seedMode: 'pick', seedAmount: 15000, initialPolicy: 'advisory', startingOps: 8, pathogenType: 'virus', aiDirectorEnabled: false },
   setSetup: (p) => set((s) => ({ setup: { ...s.setup, ...p, genes: p.genes ?? s.setup.genes } })),

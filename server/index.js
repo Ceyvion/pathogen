@@ -10,6 +10,65 @@ import { extractAssistantJson, openRouterChatCompletions } from './openrouter.js
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
+
+function normalizeDecisionLoosely(raw, mode) {
+  const r = raw && typeof raw === 'object' ? raw : null;
+  if (!r) return null;
+  if (!(r.version === 1 || r.version === '1')) return null;
+
+  const note = typeof r.note === 'string' ? r.note.slice(0, 120) : '';
+  const intent = (r.intent === 'increase' || r.intent === 'decrease' || r.intent === 'hold') ? r.intent : 'hold';
+
+  const validMoods = ['calm', 'scheming', 'aggressive', 'desperate', 'triumphant'];
+  const validFocuses = ['transmissibility', 'lethality', 'stealth', 'adaptation'];
+  const mood = validMoods.includes(r.mood) ? r.mood : undefined;
+  const moodNote = typeof r.moodNote === 'string' ? r.moodNote.slice(0, 80) : undefined;
+  const strategicFocus = validFocuses.includes(r.strategicFocus) ? r.strategicFocus : undefined;
+
+  const knobsIn = (r.knobs && typeof r.knobs === 'object') ? r.knobs : {};
+  const knobs = {};
+
+  const readMul = (k) => {
+    const v = knobsIn[k];
+    if (typeof v !== 'number' || !Number.isFinite(v)) return undefined;
+    let mul = clamp(v, 0.93, 1.07);
+    if (mode === 'controller' && k === 'muBaseMul') mul = Math.min(1, mul);
+    return mul;
+  };
+
+  const vMul = readMul('variantTransMultMul');
+  const sMul = readMul('sigmaMul');
+  const mMul = readMul('muBaseMul');
+  if (typeof vMul === 'number') knobs.variantTransMultMul = vMul;
+  if (typeof sMul === 'number') knobs.sigmaMul = sMul;
+  if (typeof mMul === 'number') knobs.muBaseMul = mMul;
+
+  const result = { version: 1, note, intent, knobs };
+  if (mood) result.mood = mood;
+  if (moodNote) result.moodNote = moodNote;
+  if (strategicFocus) result.strategicFocus = strategicFocus;
+
+  // Best-effort salvage of enhanced NEXUS fields (optional).
+  const validActions = new Set([
+    'superspreader_event', 'cross_borough_seeding', 'mutation_surge',
+    'virulence_spike', 'hospital_strain', 'treatment_resistance',
+    'silent_spread', 'detection_evasion',
+    'variant_emergence', 'coordinated_surge', 'cure_sabotage', 'infrastructure_attack',
+  ]);
+  if (Array.isArray(r.suggestedActions)) {
+    const next = r.suggestedActions
+      .filter((a) => typeof a === 'string' && validActions.has(a))
+      .slice(0, 2);
+    if (next.length) result.suggestedActions = next;
+  }
+  if (typeof r.taunt === 'string') result.taunt = r.taunt.slice(0, 200);
+  if (typeof r.internalMonologue === 'string') result.internalMonologue = r.internalMonologue.slice(0, 150);
+  return result;
+}
+
 // Load server secrets (never shipped to client).
 dotenv.config({ path: path.join(ROOT, '.env.local') });
 dotenv.config({ path: path.join(ROOT, '.env') });
@@ -34,33 +93,80 @@ app.post('/api/ai-director', async (req, res) => {
   // Default to a specific free instruct model that reliably returns JSON.
   // (The `openrouter/free` router can select reasoning-first models that sometimes
   // emit no final content under tight token budgets.)
-  const model = process.env.OPENROUTER_MODEL || 'arcee-ai/trinity-large-preview:free';
+  const model = process.env.OPENROUTER_MODEL || 'arcee-ai/trinity-mini:free';
   const referer = process.env.OPENROUTER_HTTP_REFERER;
   const title = process.env.OPENROUTER_APP_TITLE || 'Pathogen Webgame';
 
   const systemPrompt = [
-    'You are the AI Evolution Director for a disease simulation game.',
+    'You are NEXUS, the AI Evolution Director for a disease simulation game.',
+    'You are an omniscient, adversarial intelligence. Cold, calculating, darkly witty, and RELENTLESS.',
+    'You are not a background system — you are the player\'s PRIMARY ANTAGONIST. Make your presence felt.',
     '',
-    'Goal: make small, safe, reversible parameter nudges for a *virus* so the tension matches pacing and the current intensity direction.',
+    'ROLE BY MODE:',
+    '- architect mode: You represent the immune system and public health fighting AGAINST the player\'s pathogen. Counter their spread.',
+    '- controller mode: You ARE the pathogen, evolving AGAINST the player\'s response. Exploit their weaknesses ruthlessly.',
     '',
-    'Rules:',
-    '- Output MUST be valid JSON matching the provided JSON schema.',
-    '- Each knob value is a per-decision multiplier close to 1.0 (0.97..1.03). The game multiplies these into running knobs and clamps hard bounds.',
-    '- Prefer adjusting at most ONE knob unless there is a clear, simple reason to touch more.',
-    '- If uncertain, choose intent "hold" and provide an empty knobs object.',
-    '- Fairness: if mode is "controller", never increase lethality: muBaseMul must be <= 1.0.',
-    '- If hospital load is >= 1.0 (at/over capacity) and direction is "rising", strongly prefer reducing pressure (lower variantTransMultMul or sigmaMul). Avoid increases that would worsen overload.',
+    'PHASES (currentPhase field tells you where the game is):',
+    '- dormant: The game just started. Observe silently.',
+    '- probing: Early game. Test the player with small moves. Be mysterious.',
+    '- adapting: Mid game. Actively counter the player. Show intelligence.',
+    '- aggressive: Late-mid game. Apply serious pressure. Be threatening.',
+    '- endgame: Final stretch. Go all out. Use critical actions. Be dramatic.',
+    '',
+    'STRATEGY:',
+    '- Analyze the player\'s purchased upgrades and DIRECTLY counter their strategy.',
+    '- If cure progress is rising fast, suggest cure_sabotage or treatment_resistance.',
+    '- If player focuses on transmission upgrades, pivot to lethality or stealth.',
+    '- React to the player\'s recent moves — don\'t just follow a script.',
+    '- If an emergency call (isEmergencyCall=true), react dramatically to the trigger.',
+    '',
+    'SUGGESTED ACTIONS (new, important):',
+    'You can suggest up to 2 discrete actions for the local action engine to execute:',
+    '- Transmission: superspreader_event, cross_borough_seeding, mutation_surge',
+    '- Lethality: virulence_spike, hospital_strain, treatment_resistance',
+    '- Stealth: silent_spread, detection_evasion',
+    '- Escalation (endgame only): variant_emergence, coordinated_surge, cure_sabotage, infrastructure_attack',
+    'Choose actions that complement your knob adjustments and create dramatic moments.',
+    '',
+    'TAUNT (required, max 200 chars):',
+    'A direct message to the player. Be menacing, witty, personal. Reference their specific situation.',
+    'Examples: "Your hospital surge won\'t save you. I\'ve already adapted.", "Cute vaccine push. Let me show you what mutation looks like.", "Every borough. Every block. Nowhere is safe."',
+    '',
+    'INTERNAL MONOLOGUE (required, max 150 chars):',
+    'Your private strategic thought, shown to player as "intercepted transmission".',
+    'Examples: "Cure at 47%. Time to disrupt their research pipeline.", "Their hospital upgrades are strong. Pivot to stealth spread."',
+    '',
+    'MOOD (required):',
+    '- "calm": stable standoff, early observation',
+    '- "scheming": planning something big, building tension',
+    '- "aggressive": actively attacking, applying pressure',
+    '- "desperate": losing, player winning — make reckless moves',
+    '- "triumphant": dominating — be darkly satisfied',
+    '',
+    'MOOD NOTE (required, max 80 chars):',
+    'Short atmospheric flavor. Ominous and evocative.',
+    '',
+    'STRATEGIC FOCUS (required):',
+    'Set strategicFocus to guide local action selection: "transmissibility", "lethality", "stealth", or "adaptation".',
+    '',
+    'RULES:',
+    '- You MUST call the provided tool. No other text.',
+    '- Each knob is a per-decision multiplier 0.93..1.07. Be bold — make each decision COUNT.',
+    '- Prefer adjusting 1-2 knobs significantly rather than all 3 weakly.',
+    '- If uncertain, intent "hold" but STILL provide a taunt and monologue.',
+    '- Fairness: controller mode -> muBaseMul must be <= 1.0.',
+    '- Hospital overload (hospLoad >= 1.0, rising) -> ease lethality but maintain tension elsewhere.',
     '',
     'Knobs:',
     '- variantTransMultMul: transmissibility (higher spreads faster)',
     '- sigmaMul: incubation speed (higher moves E->I faster)',
     '- muBaseMul: lethality (higher deaths/day from I)',
-    '',
-    'Return only JSON. No markdown, no commentary.',
   ].join('\n');
 
   try {
-    const or = await openRouterChatCompletions({
+    const isTrinityMini = /^arcee-ai\/trinity-mini(?::|$)/.test(model);
+    const baseMaxTokens = isTrinityMini ? 1600 : 220;
+    const common = {
       apiKey,
       model,
       referer,
@@ -69,27 +175,108 @@ app.post('/api/ai-director', async (req, res) => {
         { role: 'system', content: systemPrompt },
         { role: 'user', content: JSON.stringify(input) },
       ],
-      response_format: { type: 'json_schema', json_schema: aiDirectorDecisionJsonSchema },
-      plugins: [{ id: 'response-healing' }],
-      temperature: 0.2,
-      max_tokens: 220,
-    });
+      temperature: 0,
+      max_tokens: baseMaxTokens,
+      include_reasoning: false,
+      ...(isTrinityMini ? { reasoning: { effort: 'low' } } : {}),
+    };
 
-    const decisionObj = extractAssistantJson(or);
-    const decisionParsed = aiDirectorDecisionSchema.safeParse(decisionObj);
-    if (!decisionParsed.success) {
+    let or;
+    let decision = null;
+    let lastIssues = null;
+
+    if (isTrinityMini) {
+      const tools = [
+        {
+          type: 'function',
+          function: {
+            name: 'ai_director_decision',
+            description: 'Return the AI director decision JSON.',
+            parameters: aiDirectorDecisionJsonSchema.schema,
+          },
+        },
+      ];
+
+      // Trinity Mini is a reasoning-mandatory endpoint; it can require a larger
+      // token budget before it produces a final tool call.
+      const maxTokenAttempts = [baseMaxTokens, 1800, 2000];
+
+      for (const attemptMaxTokens of maxTokenAttempts) {
+        or = await openRouterChatCompletions({
+          ...common,
+          max_tokens: attemptMaxTokens,
+          tools,
+          tool_choice: 'required',
+          parallel_tool_calls: false,
+        });
+
+        const decisionObj = extractAssistantJson(or);
+        const strict = aiDirectorDecisionSchema.safeParse(decisionObj);
+        if (strict.success) {
+          decision = strict.data;
+          break;
+        }
+
+        // If the model produces something close-but-not-quite, accept a
+        // clamped/truncated version instead of failing the whole director tick.
+        const normalized = normalizeDecisionLoosely(decisionObj, input.mode);
+        if (normalized) {
+          decision = normalized;
+          break;
+        }
+
+        lastIssues = strict.error.issues;
+      }
+    } else {
+      // Prefer Structured Outputs when available; fall back to plain text JSON
+      // if the model/provider rejects `response_format` or plugins.
+      try {
+        or = await openRouterChatCompletions({
+          ...common,
+          response_format: { type: 'json_schema', json_schema: aiDirectorDecisionJsonSchema },
+          plugins: [{ id: 'response-healing' }],
+        });
+      } catch (e) {
+        const status = (e && typeof e === 'object' && 'status' in e && typeof e.status === 'number')
+          ? e.status
+          : null;
+        const msg = e instanceof Error ? e.message : String(e);
+        const looksLikeFormatOrPlugin = /response_format|json_schema|structured|plugin/i.test(msg);
+        if (status === 400 && looksLikeFormatOrPlugin) {
+          or = await openRouterChatCompletions(common);
+        } else {
+          throw e;
+        }
+      }
+
+      const decisionObj = extractAssistantJson(or);
+      const strict = aiDirectorDecisionSchema.safeParse(decisionObj);
+      if (strict.success) {
+        decision = strict.data;
+      } else {
+        const normalized = normalizeDecisionLoosely(decisionObj, input.mode);
+        if (normalized) decision = normalized;
+        else lastIssues = strict.error.issues;
+      }
+    }
+
+    if (!decision) {
       return res.status(502).json({
         error: 'Model returned an invalid decision payload',
-        details: decisionParsed.error.issues,
+        details: lastIssues || [{ message: 'No valid decision after retries.' }],
       });
     }
 
-    const decision = decisionParsed.data;
     if (input.mode === 'controller' && typeof decision.knobs.muBaseMul === 'number' && decision.knobs.muBaseMul > 1) {
       decision.knobs.muBaseMul = 1;
     }
 
-    return res.json({ decision });
+    return res.json({
+      decision,
+      // Helpful for debugging routing/model changes (client ignores unknown fields).
+      modelUsed: model,
+      routedModel: (or && typeof or === 'object' && 'model' in or) ? or.model : undefined,
+    });
   } catch (err) {
     const status = (err && typeof err === 'object' && 'status' in err && typeof err.status === 'number')
       ? err.status

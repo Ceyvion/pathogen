@@ -20,3 +20,6 @@ coverage/
 
 # Local clones / scratch work (keep nested repos out of this repo's git status)
 external/
+
+# Local repro artifacts (screenshots/logs) created during debugging
+output/repro-map-reload*/

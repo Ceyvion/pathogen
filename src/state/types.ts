@@ -127,13 +127,56 @@ export interface AiDirectorKnobs {
   muBaseMul: number;
 }
 
+export type AiDirectorMood = 'calm' | 'scheming' | 'aggressive' | 'desperate' | 'triumphant';
+export type AiDirectorFocus = 'transmissibility' | 'lethality' | 'stealth' | 'adaptation';
+
+// NEXUS escalation phases – driven by game progress, not LLM calls.
+export type NexusPhase = 'dormant' | 'probing' | 'adapting' | 'aggressive' | 'endgame';
+
+// Discrete actions NEXUS can take between LLM calls.
+export type NexusActionId =
+  // Transmission
+  | 'superspreader_event'
+  | 'cross_borough_seeding'
+  | 'mutation_surge'
+  // Lethality
+  | 'virulence_spike'
+  | 'hospital_strain'
+  | 'treatment_resistance'
+  // Stealth
+  | 'silent_spread'
+  | 'detection_evasion'
+  // Escalation (endgame)
+  | 'variant_emergence'
+  | 'coordinated_surge'
+  | 'cure_sabotage'
+  | 'infrastructure_attack';
+
+export interface NexusActiveEffect {
+  id: number;
+  actionId: NexusActionId;
+  startDay: number;
+  endDay: number; // exclusive end day index (-1 for permanent effects)
+  params: Record<string, number>; // action-specific params (e.g. targetBorough, magnitude)
+  label: string; // short display label
+}
+
+export type NexusSeverity = 'minor' | 'major' | 'critical';
+
 export interface AiDirectorDecision {
   version: 1;
   note: string;
   intent: 'increase' | 'decrease' | 'hold';
+  mood?: AiDirectorMood;
+  moodNote?: string;
+  strategicFocus?: AiDirectorFocus;
   // Per-decision multipliers (close to 1.0). The client multiplies these into
   // the running knobs and clamps to hard bounds.
   knobs: Partial<AiDirectorKnobs>;
+  // Enhanced NEXUS personality fields
+  suggestedActions?: NexusActionId[];
+  taunt?: string;
+  internalMonologue?: string;
 }
 
 export interface AiDirectorDaySnapshot {
@@ -157,6 +200,44 @@ export interface AiDirectorState {
   dailyUsage: { dateKey: string; count: number };
   history: AiDirectorDaySnapshot[]; // capped ring buffer
   knobs: AiDirectorKnobs;
+  // NEXUS personality & presence
+  mood: AiDirectorMood;
+  moodNote: string;
+  strategicFocus: AiDirectorFocus | null;
+  playerThreatLevel: number; // 0..1
+  totalDecisions: number;
+  lastSurpriseDay: number;
+  // NEXUS action engine state
+  phase: NexusPhase;
+  activeEffects: NexusActiveEffect[];
+  lastActionDay: number;
+  actionCooldowns: Partial<Record<NexusActionId, number>>; // day when action available again
+  disabledUpgrades: string[]; // upgrade IDs temporarily knocked out by infrastructure_attack
+  nextEffectId: number;
+  // Enhanced LLM fields
+  taunt: string;
+  internalMonologue: string;
+  lastEmergencyCallMs: number | null; // rate-limit emergency LLM calls
+  cureThresholdsCrossed: number[]; // which cure % thresholds triggered emergency calls
+}
+
+// Repeatable late-game actions that cost resources and have cooldowns.
+export interface EmergencyAction {
+  id: string;
+  name: string;
+  cost: number;
+  duration: number; // game days (-1 = instant)
+  cooldown: number; // game days before reuse
+  effects: UpgradeEffects;
+  desc: string;
+  mode: GameMode; // which mode this action is available in
+  category: 'emergency' | 'counter_nexus';
+}
+
+export interface ActiveEmergencyEffect {
+  actionId: string;
+  startDay: number;
+  endDay: number; // exclusive end day index
 }
 
 export interface WorldState {
@@ -192,6 +273,9 @@ export interface WorldState {
   patientZeroSeedAmount?: number;
   aiDirector?: AiDirectorState;
   hospResponseTier: HospResponseTier;
+  // Late-game emergency actions
+  activeEmergencyEffects: ActiveEmergencyEffect[];
+  emergencyCooldowns: Record<string, number>; // actionId -> day when available again
 }
 
 export interface TravelEdge { from: CountryID; to: CountryID; daily: number; }

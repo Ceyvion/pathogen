@@ -1,5 +1,46 @@
 # TODO
 
+## Task: Map Fails To Load After Reload (2026-02-08)
+
+## Plan
+
+- [x] Repro in browser (dev + preview) and capture console errors/network failures.
+- [x] Identify whether this is MapLibre init, style loading, GeoJSON source load, or deck.gl overlay failure.
+- [x] Implement minimal fix (persist scene + auto-save on reload + auto-resume).
+- [x] Add regression coverage where feasible (Playwright smoke repro).
+
+## Verification
+
+- [x] Manual-ish: Playwright repro script shows `.nyc-map` exists after reload and is not stuck on Title.
+- [x] `pnpm check`
+- [x] `pnpm test --run`
+- [x] `pnpm build`
+
+## Review
+
+- Persisted last UI scene (`sceneV1`) and added `resumeOnLoad` so browser refresh returns to gameplay when a save exists.
+- Added auto-save on `pagehide`/`beforeunload` while in-game so refresh always has a snapshot to restore.
+
+## Task: NEXUS Action Cadence Guardrails (Suggested Action Dedup + Monotonic Phase) (2026-02-08)
+
+## Plan
+
+- [x] Prevent LLM `suggestedActions` from firing on the same in-game day as a local daily NEXUS action (dedupe via `aiDirector.lastActionDay`).
+- [x] Make `aiDirector.phase` monotonic (never decreases on cure progress setbacks).
+- [x] Add Vitest coverage for both behaviors.
+
+## Verification
+
+- [x] `pnpm check`
+- [x] `pnpm test --run`
+- [x] `pnpm build`
+
+## Review
+
+- Suggested actions are skipped if `aiDirector.lastActionDay === curDay`, preventing same-day action spikes from LLM + local engine overlap.
+- NEXUS phase escalates monotonically (only updates when the computed phase is higher), so cure setbacks no longer de-escalate the phase.
+- Added tests covering both behaviors in `src/state/__tests__/aiDirector.test.ts`.
+
 ## Task: Hospital Overload Response + AI Director Guardrails (2026-02-07)
 
 ## Plan
@@ -79,6 +120,35 @@
 
 - Add `OPENROUTER_API_KEY` to `.env.local` to enable.
 - Free-model calls are conservative (cooldowns + daily budget).
+
+## Task: OpenRouter Model Switch (Trinity Mini) (2026-02-08)
+
+## Plan
+
+- [x] Switch server default model to `arcee-ai/trinity-mini:free`.
+- [x] Update OpenRouter client to support pass-through params and extract tool-call JSON (`tool_calls[].function.arguments`).
+- [x] Update `/api/ai-director` to use tool-calling + retries and bump token budget for Trinity Mini (reasoning-mandatory endpoint).
+- [x] Verify `/api/ai-director` returns 200 with valid `decision` for architect + controller inputs.
+
+## Verification
+
+- [x] `pnpm check`
+- [x] `pnpm test --run`
+- [x] `pnpm build`
+
+## Task: Fix Borough Overlay Flicker (2026-02-08)
+
+## Plan
+
+- [x] Identify flicker source in deck.gl infection speckles/dust overlays (layers were only rendered for a single frame per update window).
+- [x] Persist the infection FX buffers and fade particles in/out to avoid blinking.
+- [x] Disable depth testing for the speckle/dust/death overlays to prevent shimmer against 3D buildings.
+
+## Verification
+
+- [x] `pnpm check`
+- [x] `pnpm test --run`
+- [x] `pnpm build`
 
 ## Task: Harden Upgrade Effect Typing (Remove `as any`) (2026-02-07)
 

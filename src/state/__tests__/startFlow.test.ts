@@ -80,4 +80,42 @@ describe('Start Flow Gating', () => {
     const anySeeded = Object.values(s.countries).some((c) => c.E > 0 || c.I > 0);
     expect(anySeeded).toBe(false);
   });
+
+  it('save/load preserves awaitingPatientZero gating (refresh continuity)', () => {
+    // Store save/load uses localStorage; provide a minimal mock for node test env.
+    const mem: Record<string, string> = {};
+    const prev = (globalThis as any).localStorage;
+    (globalThis as any).localStorage = {
+      getItem: (k: string) => (k in mem ? mem[k] : null),
+      setItem: (k: string, v: string) => { mem[k] = String(v); },
+      removeItem: (k: string) => { delete mem[k]; },
+      clear: () => { for (const k of Object.keys(mem)) delete mem[k]; },
+    };
+
+    const a = useGameStore.getState().actions;
+    // We start in architect pick mode in beforeEach: paused + awaiting with seed amount.
+    expect(snapshot().awaiting).toBe(true);
+    const amt0 = (useGameStore.getState() as any).patientZeroSeedAmount;
+    expect(amt0).toBe(6000);
+
+    try {
+      a.saveGame();
+
+      // Mutate state to ensure load restores it.
+      useGameStore.setState((st) => {
+        st.awaitingPatientZero = false;
+        (st as any).patientZeroSeedAmount = 123;
+        st.paused = false;
+      });
+
+      a.loadGame();
+      expect(snapshot().awaiting).toBe(true);
+      const amt1 = (useGameStore.getState() as any).patientZeroSeedAmount;
+      expect(amt1).toBe(6000);
+      expect(snapshot().paused).toBe(true);
+    } finally {
+      if (typeof prev === 'undefined') delete (globalThis as any).localStorage;
+      else (globalThis as any).localStorage = prev;
+    }
+  });
 });

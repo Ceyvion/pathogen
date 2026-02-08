@@ -23,6 +23,7 @@ export async function openRouterChatCompletions({
   plugins,
   referer,
   title,
+  ...rest
 }) {
   const res = await fetch(OPENROUTER_CHAT_URL, {
     method: 'POST',
@@ -33,6 +34,7 @@ export async function openRouterChatCompletions({
       ...(title ? { 'X-Title': title } : {}),
     },
     body: JSON.stringify({
+      ...rest,
       model,
       messages,
       response_format,
@@ -62,7 +64,27 @@ export async function openRouterChatCompletions({
 }
 
 export function extractAssistantJson(openRouterResponse) {
-  const content = openRouterResponse?.choices?.[0]?.message?.content;
+  const message = openRouterResponse?.choices?.[0]?.message;
+
+  // Prefer tool-call arguments when present (most reliable structured output).
+  const toolCalls = message?.tool_calls;
+  if (Array.isArray(toolCalls) && toolCalls.length) {
+    for (const tc of toolCalls) {
+      const args = tc?.function?.arguments;
+      if (args && typeof args === 'object') return args;
+      const parsedArgs = tryParseJsonLoose(args);
+      if (parsedArgs) return parsedArgs;
+    }
+  }
+
+  const content = message?.content;
   if (content && typeof content === 'object') return content;
-  return tryParseJsonLoose(content);
+  const parsedContent = tryParseJsonLoose(content);
+  if (parsedContent) return parsedContent;
+
+  // Some OpenRouter providers/models (especially "reasoning" models) may place
+  // the primary output in `message.reasoning` and leave `message.content` empty.
+  const reasoning = message?.reasoning;
+  if (reasoning && typeof reasoning === 'object') return reasoning;
+  return tryParseJsonLoose(reasoning);
 }

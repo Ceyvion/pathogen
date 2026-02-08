@@ -19,3 +19,6 @@ Notes:
 - Bundled borough GeoJSON locally (`src/assets/nyc-boroughs.geojson`) and load via Vite asset URL to remove reliance on GitHub raw fetch.
 - Styled MapLibre controls to match the game's glass HUD.
 - Setup screen theme toggle now shows the current theme (“Theme: Light/Dark”) instead of the next theme label.
+
+2026-02-08
+- Fixed refresh/reload continuity: persist last UI scene (`sceneV1`), auto-save on unload, and auto-resume into gameplay when a save exists.

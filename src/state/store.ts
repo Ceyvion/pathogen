@@ -1,11 +1,13 @@
 import { create } from 'zustand';
 import { playMilestone } from '../audio/sfx';
 import { immer } from 'zustand/middleware/immer';
-import type { Country, CountryID, TravelEdge, Upgrade, WorldState, GameMode, Story, GeneId, BubbleType, PathogenType, BankedPickup, Params, AiDirectorDecision, AiDirectorKnobs, AiDirectorState, HospResponseTier } from './types';
+import type { Country, CountryID, TravelEdge, Upgrade, WorldState, GameMode, Story, GeneId, BubbleType, PathogenType, BankedPickup, Params, AiDirectorDecision, AiDirectorKnobs, AiDirectorState, HospResponseTier, NexusPhase, NexusActionId, EmergencyAction } from './types';
 import { STORIES } from '../story/stories';
 import { maybeGenerateWorldEvent } from '../events/worldEvents';
 import { computeDirection, computeVirusDirectorSnapshot } from '../sim/aiDirectorMetrics';
 import { HOSP_RESPONSE_TIERS, nextHospResponseTier } from '../sim/hospResponse';
+import { computeNexusPhase, maybeSelectNexusAction, aggregateNexusEffects, NEXUS_ACTION_CATALOG } from '../sim/nexusActions';
+import { generateNexusEventText } from '../events/nexusEvents';
 
 type Actions = {
   setSpeed: (s: 1 | 3 | 10) => void;
@@ -46,6 +48,7 @@ type Actions = {
   setAwaitingPatientZero: (v: boolean) => void;
   setAiDirectorEnabled: (v: boolean) => void;
   requestAiDirectorDecision: () => Promise<void>;
+  activateEmergencyAction: (actionId: string, targetBorough?: CountryID) => void;
 };
 
 export type GameStore = WorldState & { actions: Actions };
@@ -64,18 +67,38 @@ const PACING_PRESETS = {
 const BORO_IDS = ['manhattan', 'brooklyn', 'queens', 'bronx', 'staten_island'] as const satisfies readonly CountryID[];
 
 const AI_DIRECTOR_CFG = {
-  minInGameDays: 5,
-  minRealTimeMs: 4 * 60_000,
+  minInGameDays: 3,
+  minRealTimeMs: 2 * 60_000,
   dailyBudget: 45,
   historyMaxDays: 14,
-  perDecisionMulMin: 0.97,
-  perDecisionMulMax: 1.03,
-  knobMulMin: 0.85,
-  knobMulMax: 1.15,
+  perDecisionMulMin: 0.93,
+  perDecisionMulMax: 1.07,
+  knobMulMin: 0.75,
+  knobMulMax: 1.25,
   dailyDecayTowardNeutral: 0.08,
+  emergencyCallMinMs: 3 * 60_000, // min real-time between emergency LLM calls
 } as const;
 
 const AI_DEFAULT_KNOBS: AiDirectorKnobs = { variantTransMultMul: 1, sigmaMul: 1, muBaseMul: 1 };
+
+// Late-game repeatable emergency actions (available after all upgrades purchased).
+export const EMERGENCY_ACTIONS: EmergencyAction[] = [
+  // Controller mode
+  { id: 'em_staffing', name: 'Emergency Staffing', cost: 8, duration: 5, cooldown: 8, mode: 'controller', category: 'emergency', desc: '+20% hospital capacity for 5 days', effects: { hospCapacityMul: 1.20 } },
+  { id: 'em_testing', name: 'Surge Testing', cost: 6, duration: 3, cooldown: 6, mode: 'controller', category: 'emergency', desc: '-8% transmission for 3 days', effects: { betaMul: 0.92 } },
+  { id: 'em_research', name: 'Emergency Research Grant', cost: 12, duration: 5, cooldown: 10, mode: 'controller', category: 'emergency', desc: '+0.3% cure/day for 5 days', effects: { cureAddPerDay: 0.3 } },
+  { id: 'em_lockdown', name: 'Lockdown Enforcement', cost: 10, duration: 3, cooldown: 7, mode: 'controller', category: 'emergency', desc: '-15% transmission for 3 days', effects: { betaMul: 0.85 } },
+  { id: 'em_booster', name: 'Vaccine Booster Campaign', cost: 10, duration: 4, cooldown: 8, mode: 'controller', category: 'emergency', desc: '+0.2% cure/day, faster recovery for 4 days', effects: { cureAddPerDay: 0.2, gammaRecMul: 1.10 } },
+  // Controller anti-NEXUS countermeasures
+  { id: 'cn_firewall', name: 'Firewall', cost: 15, duration: -1, cooldown: 10, mode: 'controller', category: 'counter_nexus', desc: 'Cancel one active NEXUS effect', effects: {} },
+  { id: 'cn_counter_evo', name: 'Counter-Evolution', cost: 20, duration: -1, cooldown: 12, mode: 'controller', category: 'counter_nexus', desc: 'Push NEXUS knobs 5% toward neutral', effects: {} },
+  { id: 'cn_predict', name: 'Predictive Analysis', cost: 10, duration: -1, cooldown: 8, mode: 'controller', category: 'counter_nexus', desc: 'Reveal NEXUS cooldown state', effects: {} },
+  // Architect mode
+  { id: 'em_hypermut', name: 'Hypermutation Burst', cost: 8, duration: 3, cooldown: 6, mode: 'architect', category: 'emergency', desc: '+20% transmission for 3 days', effects: { betaMul: 1.20 } },
+  { id: 'em_immune_evade', name: 'Immune Evasion Pulse', cost: 10, duration: 4, cooldown: 8, mode: 'architect', category: 'emergency', desc: '-15% recovery rate for 4 days', effects: { gammaRecMul: 0.85 } },
+  { id: 'em_targeted', name: 'Targeted Outbreak', cost: 6, duration: -1, cooldown: 5, mode: 'architect', category: 'emergency', desc: 'Seed 5k exposed in chosen borough', effects: {} },
+  { id: 'em_cure_disrupt', name: 'Cure Disruption', cost: 12, duration: -1, cooldown: 10, mode: 'architect', category: 'emergency', desc: 'Set back cure by 2%', effects: {} },
+];
 
 function localDateKey(nowMs: number) {
   const d = new Date(nowMs);
@@ -112,6 +135,24 @@ function createAiDirectorState(nowMs: number, enabled: boolean): AiDirectorState
     dailyUsage: { dateKey: localDateKey(nowMs), count: 0 },
     history: [],
     knobs: { ...AI_DEFAULT_KNOBS },
+    mood: 'calm',
+    moodNote: '',
+    strategicFocus: null,
+    playerThreatLevel: 0,
+    totalDecisions: 0,
+    lastSurpriseDay: 0,
+    // NEXUS action engine
+    phase: 'dormant',
+    activeEffects: [],
+    lastActionDay: 0,
+    actionCooldowns: {},
+    disabledUpgrades: [],
+    nextEffectId: 1,
+    // Enhanced LLM fields
+    taunt: '',
+    internalMonologue: '',
+    lastEmergencyCallMs: null,
+    cureThresholdsCrossed: [],
   };
 }
 
@@ -121,6 +162,12 @@ function normalizeAiDecision(raw: unknown, mode: GameMode): AiDirectorDecision |
   const note = typeof r.note === 'string' ? r.note.slice(0, 120) : '';
   const intent: AiDirectorDecision['intent'] =
     r.intent === 'increase' || r.intent === 'decrease' || r.intent === 'hold' ? r.intent : 'hold';
+
+  const validMoods = ['calm', 'scheming', 'aggressive', 'desperate', 'triumphant'] as const;
+  const validFocuses = ['transmissibility', 'lethality', 'stealth', 'adaptation'] as const;
+  const mood = validMoods.includes(r.mood) ? r.mood : undefined;
+  const moodNote = typeof r.moodNote === 'string' ? r.moodNote.slice(0, 80) : undefined;
+  const strategicFocus = validFocuses.includes(r.strategicFocus) ? r.strategicFocus : undefined;
 
   const knobsIn = (r.knobs && typeof r.knobs === 'object') ? r.knobs : {};
   const knobs: Partial<AiDirectorKnobs> = {};
@@ -140,7 +187,20 @@ function normalizeAiDecision(raw: unknown, mode: GameMode): AiDirectorDecision |
   if (typeof sMul === 'number') knobs.sigmaMul = sMul;
   if (typeof mMul === 'number') knobs.muBaseMul = mMul;
 
-  return { version: 1, note, intent, knobs };
+  // Enhanced NEXUS fields
+  const validActions: NexusActionId[] = [
+    'superspreader_event', 'cross_borough_seeding', 'mutation_surge',
+    'virulence_spike', 'hospital_strain', 'treatment_resistance',
+    'silent_spread', 'detection_evasion',
+    'variant_emergence', 'coordinated_surge', 'cure_sabotage', 'infrastructure_attack',
+  ];
+  const suggestedActions = Array.isArray(r.suggestedActions)
+    ? (r.suggestedActions as string[]).filter(a => validActions.includes(a as NexusActionId)).slice(0, 2) as NexusActionId[]
+    : undefined;
+  const taunt = typeof r.taunt === 'string' ? r.taunt.slice(0, 200) : undefined;
+  const internalMonologue = typeof r.internalMonologue === 'string' ? r.internalMonologue.slice(0, 150) : undefined;
+
+  return { version: 1, note, intent, knobs, mood, moodNote, strategicFocus, suggestedActions, taunt, internalMonologue };
 }
 
 function clampSeedAmount(n: unknown, fallback: number) {
@@ -230,8 +290,8 @@ function baseParams(): Params {
     // early-game pacing: short grace and gradual ramp
     startRampDelayDays: 6,
     startRampDurationDays: 35,
-    earlyPointBoostDays: 10,
-    earlyPointBoostMul: 1.4,
+    earlyPointBoostDays: 18,
+    earlyPointBoostMul: 1.6,
   };
 }
 
@@ -277,7 +337,7 @@ function paramsForType(type: PathogenType): Params {
 }
 
 const baseUpgradesArchitect = (): Record<string, Upgrade> => ({
-  tx1: { id: 'tx1', name: 'Aerosol Stability', branch: 'transmission', cost: 8, desc: '+10% transmission', effects: { betaMul: 1.10 } },
+  tx1: { id: 'tx1', name: 'Aerosol Stability', branch: 'transmission', cost: 5, desc: '+10% transmission', effects: { betaMul: 1.10 } },
   tx2: { id: 'tx2', name: 'Surface Persistence', branch: 'transmission', cost: 16, desc: '+12% transmission', effects: { betaMul: 1.12 }, prereqs: ['tx1'] },
   tx3: { id: 'tx3', name: 'Shorter Incubation', branch: 'transmission', cost: 18, desc: '+10% incubation rate', effects: { sigmaMul: 1.10 }, prereqs: ['tx1'] },
   tx4: { id: 'tx4', name: 'Subway Aerosolization', branch: 'transmission', cost: 22, desc: 'Pathogen survives 6+ hours on stainless steel handrails. The morning commute becomes a vector.', effects: { betaMul: 1.14 }, prereqs: ['tx2'] },
@@ -291,7 +351,7 @@ const baseUpgradesArchitect = (): Record<string, Upgrade> => ({
   tx12: { id: 'tx12', name: 'Superspreader Events', branch: 'transmission', cost: 35, desc: 'Mass gatherings amplify spread exponentially. One concert. One subway car. One funeral.', effects: { betaMul: 1.20, dnaRateAdd: 0.08 }, prereqs: ['tx4'] },
   tx13: { id: 'tx13', name: 'Pandemic Adaptation', branch: 'transmission', cost: 50, desc: 'Total environmental integration. The pathogen is everywhere, in everything, undeniable.', effects: { betaMul: 1.12, policyResistMul: 1.15 }, prereqs: ['tx11', 'tx12'] },
 
-  sym1: { id: 'sym1', name: 'Stealthy Symptoms', branch: 'symptoms', cost: 12, desc: 'Undercut policy (×1.2 resist)', effects: { policyResistMul: 1.2 } },
+  sym1: { id: 'sym1', name: 'Stealthy Symptoms', branch: 'symptoms', cost: 7, desc: 'Undercut policy (×1.2 resist)', effects: { policyResistMul: 1.2 } },
   sym2: { id: 'sym2', name: 'Aggressive Shedding', branch: 'symptoms', cost: 20, desc: '+8% transmission, +0.1 DNA/day', effects: { betaMul: 1.08, dnaRateAdd: 0.1 }, prereqs: ['sym1'] },
   sym3: { id: 'sym3', name: 'Subclinical Fatigue', branch: 'symptoms', cost: 16, desc: 'Infected feel tired but functional. They go to work. They ride the subway. They spread it.', effects: { policyResistMul: 1.15, asymptomaticSpreadMul: 1.10 }, prereqs: ['sym1'] },
   sym4: { id: 'sym4', name: 'Delayed Onset', branch: 'symptoms', cost: 22, desc: 'Incubation extends invisibly. By the time symptoms appear, everyone nearby is already exposed.', effects: { exposedDurationMul: 0.8, policyResistMul: 1.1 }, prereqs: ['sym3'] },
@@ -304,9 +364,9 @@ const baseUpgradesArchitect = (): Record<string, Upgrade> => ({
   sym11: { id: 'sym11', name: 'Pain Suppression', branch: 'symptoms', cost: 20, desc: "Fewer show symptoms. More move freely. The pathogen hides behind the body's silence.", effects: { symFracMul: 0.85, betaMul: 1.05 }, prereqs: ['sym1'] },
   sym12: { id: 'sym12', name: 'Cytokine Storm Trigger', branch: 'symptoms', cost: 48, desc: 'Fatal immune overreaction in 15% of cases. Hospitals cannot intervene fast enough.', effects: { muMul: 1.4, hospRateMul: 1.3, dnaRateAdd: 0.2 }, prereqs: ['sym7', 'sym8'] },
 
-  ab1: { id: 'ab1', name: 'Immune Escape v1', branch: 'abilities', cost: 14, desc: '-5% recovery speed', effects: { gammaRecMul: 0.95 } },
+  ab1: { id: 'ab1', name: 'Immune Escape v1', branch: 'abilities', cost: 8, desc: '-5% recovery speed', effects: { gammaRecMul: 0.95 } },
   ab2: { id: 'ab2', name: 'Policy Evasion', branch: 'abilities', cost: 22, desc: 'Undercut policy (×1.5 resist)', effects: { policyResistMul: 1.5 }, prereqs: ['ab1'] },
-  ab3: { id: 'ab3', name: 'Cold Resistant', branch: 'abilities', cost: 12, desc: '+5% transmission (cold season)', effects: { betaMul: 1.05 } },
+  ab3: { id: 'ab3', name: 'Cold Resistant', branch: 'abilities', cost: 7, desc: '+5% transmission (cold season)', effects: { betaMul: 1.05 } },
   ab4: { id: 'ab4', name: 'Genetic Reshuffle', branch: 'abilities', cost: 24, desc: 'Slows cure progress (−20%)', effects: { cureRateMul: 0.8 } },
   ab5: { id: 'ab5', name: 'Drug Resistance', branch: 'abilities', cost: 26, desc: 'Standard antivirals fail. Pharmaceutical companies scramble. The clock resets on treatment.', effects: { gammaRecMul: 0.88, cureRateMul: 0.85 }, prereqs: ['ab1'] },
   ab6: { id: 'ab6', name: 'Thermal Tolerance', branch: 'abilities', cost: 18, desc: 'Survives body temperature extremes. Fever is no longer a defense mechanism.', effects: { betaMul: 1.07 }, prereqs: ['ab3'] },
@@ -321,11 +381,11 @@ const baseUpgradesArchitect = (): Record<string, Upgrade> => ({
 });
 
 const baseUpgradesController = (): Record<string, Upgrade> => ({
-  ops1: { id: 'ops1', name: 'Mask Mandate', branch: 'transmission', cost: 8, desc: 'Reduce contacts (−8% β)', effects: { betaMul: 0.92 } },
-  ops2: { id: 'ops2', name: 'Testing Ramp-up', branch: 'abilities', cost: 10, desc: 'Faster recovery via isolation (+5% γ) and research (+0.05%/day)', effects: { gammaRecMul: 1.05, cureAddPerDay: 0.05 } },
+  ops1: { id: 'ops1', name: 'Mask Mandate', branch: 'transmission', cost: 5, desc: 'Reduce contacts (−8% β)', effects: { betaMul: 0.92 } },
+  ops2: { id: 'ops2', name: 'Testing Ramp-up', branch: 'abilities', cost: 6, desc: 'Faster recovery via isolation (+5% γ) and research (+0.05%/day)', effects: { gammaRecMul: 1.05, cureAddPerDay: 0.05 } },
   ops3: { id: 'ops3', name: 'Contact Tracing', branch: 'abilities', cost: 14, desc: 'Reduce effective contacts (−10% β) and research (+0.04%/day)', effects: { betaMul: 0.90, cureAddPerDay: 0.04 }, prereqs: ['ops2'] },
-  ops4: { id: 'ops4', name: 'Border Screening', branch: 'transmission', cost: 12, desc: 'Lower importations (−50%)', effects: { importationMul: 0.5 } },
-  ops5: { id: 'ops5', name: 'Public Campaigns', branch: 'symptoms', cost: 10, desc: 'Boost policy effectiveness (×1.25) and research (+0.03%/day)', effects: { policyResistMul: 1.25, cureAddPerDay: 0.03 } },
+  ops4: { id: 'ops4', name: 'Border Screening', branch: 'transmission', cost: 8, desc: 'Lower importations (−50%)', effects: { importationMul: 0.5 } },
+  ops5: { id: 'ops5', name: 'Public Campaigns', branch: 'symptoms', cost: 6, desc: 'Boost policy effectiveness (×1.25) and research (+0.03%/day)', effects: { policyResistMul: 1.25, cureAddPerDay: 0.03 } },
   ops6: { id: 'ops6', name: 'Vaccine R&D', branch: 'abilities', cost: 18, desc: 'Accelerate cure (+25%) and research (+0.25%/day)', effects: { cureRateMul: 1.25, cureAddPerDay: 0.25 } },
   ops7: { id: 'ops7', name: 'Vaccine Manufacturing', branch: 'abilities', cost: 22, desc: 'Accelerate cure (+35%) and research (+0.35%/day)', effects: { cureRateMul: 1.35, cureAddPerDay: 0.35 }, prereqs: ['ops6'] },
 
@@ -640,6 +700,8 @@ export const useGameStore = create<GameStore>()(
     pathogenType: 'virus',
     hospResponseTier: 0,
     aiDirector: createAiDirectorState(Date.now(), false),
+    activeEmergencyEffects: [],
+    emergencyCooldowns: {},
     mutationDebt: 0,
     antibioticResistance: 0,
     fungusBurstDaysLeft: 0,
@@ -720,6 +782,10 @@ export const useGameStore = create<GameStore>()(
         if (hist.length < 3) return;
         const direction = computeDirection(hist);
         const intensities7d = hist.slice(-7).map((h) => h.intensity);
+        const purchasedUpgradeNames = Object.values(st0.upgrades)
+          .filter(u => u.purchased)
+          .map(u => u.name);
+
         const payload = {
           version: 1,
           mode: st0.mode,
@@ -735,8 +801,16 @@ export const useGameStore = create<GameStore>()(
             sigma: st0.params.sigma,
             muBase: st0.params.muBase,
             variantTransMult: st0.params.variantTransMult,
-          },
-        } as const;
+	          },
+	          // Player intelligence for NEXUS
+	          playerUpgrades: purchasedUpgradeNames.slice(0, 50),
+	          cureProgress: st0.cureProgress,
+	          totalDecisions: ai0.totalDecisions ?? 0,
+	          currentMood: ai0.mood ?? 'calm',
+	          // Enhanced context for NEXUS action engine
+	          currentPhase: ai0.phase ?? 'dormant',
+	          activeNexusEffects: (ai0.activeEffects ?? []).map(e => e.label).slice(0, 20),
+	        } as const;
 
         set((st) => {
           if (!st.aiDirector) st.aiDirector = createAiDirectorState(nowMs, true);
@@ -800,11 +874,93 @@ export const useGameStore = create<GameStore>()(
             ai.lastEvalDay = dayIndex;
             ai.pending = false;
             ai.error = null;
+            ai.totalDecisions = (ai.totalDecisions ?? 0) + 1;
 
-            const dir = computeDirection(ai.history || []);
+            // Apply NEXUS personality fields
+            if (decision.mood) ai.mood = decision.mood;
+            if (decision.moodNote) ai.moodNote = decision.moodNote;
+	            ai.strategicFocus = decision.strategicFocus ?? ai.strategicFocus;
+	            if (decision.taunt) ai.taunt = decision.taunt;
+	            if (decision.internalMonologue) ai.internalMonologue = decision.internalMonologue;
+
+		            // LLM-suggested actions: execute them via the same phase/severity rules as the local engine.
+		            // Guardrail: avoid stacking a suggested action on the same in-game day as a local NEXUS action.
+		            if (decision.suggestedActions?.length) {
+		              const curDay = Math.floor(st.day);
+		              if (ai.lastActionDay !== curDay) {
+		              const phaseNow = ai.phase;
+		              const SEV_ORDER = { minor: 0, major: 1, critical: 2 } as const;
+		              const PHASE_MAX_SEV = {
+		                dormant: 'minor',
+		                probing: 'minor',
+		                adapting: 'major',
+		                aggressive: 'major',
+		                endgame: 'critical',
+		              } as const satisfies Record<NexusPhase, keyof typeof SEV_ORDER>;
+		              const maxSev = SEV_ORDER[PHASE_MAX_SEV[phaseNow]];
+
+		              if (phaseNow !== 'dormant') {
+		                for (const actionId of decision.suggestedActions) {
+	                  const def = NEXUS_ACTION_CATALOG.find(a => a.id === actionId);
+	                  if (!def) continue;
+	                  // Respect phase limits (no endgame-only actions early, no critical pre-endgame).
+	                  if (def.endgameOnly && phaseNow !== 'endgame') continue;
+	                  if (SEV_ORDER[def.severity] > maxSev) continue;
+	                  // Respect cooldowns
+	                  const cd = ai.actionCooldowns[actionId] ?? 0;
+	                  if (curDay < cd) continue;
+	                  const params = def.buildParams(st);
+	                  const endDay = def.durationDays === -1 ? -1
+	                    : def.durationDays === 0 ? curDay : curDay + def.durationDays;
+                ai.activeEffects.push({
+                  id: ai.nextEffectId++,
+                  actionId,
+                  startDay: curDay,
+                  endDay,
+                  params,
+                  label: def.label,
+                });
+                ai.actionCooldowns[actionId] = curDay + def.cooldownDays;
+                ai.lastActionDay = curDay;
+                // Handle instant effects
+                if (actionId === 'cross_borough_seeding') {
+                  const boroughIds = Object.keys(st.countries);
+                  const bId = boroughIds[params.targetBorough] ?? boroughIds[0];
+                  const c = st.countries[bId];
+                  if (c) { const seed = Math.min(c.S, params.seedExposed ?? 0); c.S -= seed; c.E += seed; }
+                }
+                if (actionId === 'treatment_resistance' || actionId === 'cure_sabotage') {
+                  st.cureProgress = Math.max(0, st.cureProgress - (params.cureSetback ?? 0));
+                }
+                if (actionId === 'infrastructure_attack') {
+                  const purchased = Object.values(st.upgrades).filter(u => u.purchased);
+                  if (purchased.length > 0) {
+                    const tgt = purchased[Math.floor(Math.random() * purchased.length)];
+                    if (!ai.disabledUpgrades.includes(tgt.id)) ai.disabledUpgrades.push(tgt.id);
+                  }
+                }
+		                const narrative = generateNexusEventText(actionId, st);
+		                st.events.unshift(narrative);
+		              }
+		            }
+		          }
+		        }
+
+		            // Compute threat level from game state
+		            const totalPop = Object.values(st.countries).reduce((s, c) => s + c.pop, 0);
+            const totalI = Object.values(st.countries).reduce((s, c) => s + c.I, 0);
+            const cureRatio = st.cureProgress / 100;
+            const infRatio = totalI / Math.max(1, totalPop);
+            const latestSnap = ai.history?.[ai.history.length - 1];
+            const intensity = latestSnap?.intensity ?? 0;
+            ai.playerThreatLevel = st.mode === 'controller'
+              ? Math.max(0, Math.min(1, 0.5 * cureRatio + 0.3 * (1 - infRatio) + 0.2 * (1 - intensity)))
+              : Math.max(0, Math.min(1, 0.5 * infRatio + 0.3 * intensity + 0.2 * (1 - cureRatio)));
+
             const core = parts.length ? parts.join(', ') : 'hold';
-            const note = decision.note ? ` — ${decision.note}` : '';
-            st.events.unshift(`AI variant drift: ${core} (pressure ${dir})${note}`);
+            const moodTag = ai.mood !== 'calm' ? ` [${ai.mood}]` : '';
+            const tauntStr = decision.taunt ? ` "${decision.taunt}"` : (decision.moodNote ? ` "${decision.moodNote}"` : (decision.note ? ` — ${decision.note}` : ''));
+            st.events.unshift(`NEXUS${moodTag}: ${core}${tauntStr}`);
             while (st.events.length > MAX_EVENTS) st.events.pop();
           });
         } catch (err) {
@@ -828,6 +984,96 @@ export const useGameStore = create<GameStore>()(
           });
         }
       },
+      activateEmergencyAction: (actionId, targetBorough) => set((st) => {
+        const def = EMERGENCY_ACTIONS.find(a => a.id === actionId);
+        if (!def) return;
+        if (def.mode !== st.mode) return;
+        if (st.dna < def.cost) return;
+        const curDay = Math.floor(st.day);
+        const cd = st.emergencyCooldowns[actionId] ?? 0;
+        if (curDay < cd) return;
+
+        // Preconditions that avoid charging the player for a no-op.
+        let firewallIdx = -1;
+        if (def.category === 'counter_nexus') {
+          const ai = st.aiDirector;
+          if (!ai?.enabled) {
+            st.events.unshift('Counter-NEXUS systems offline: AI director not active');
+            return;
+          }
+          if (actionId === 'cn_firewall') {
+            // Find the most recent *active* effect (decisions can add effects mid-day).
+            for (let i = ai.activeEffects.length - 1; i >= 0; i--) {
+              const e = ai.activeEffects[i];
+              if (e.endDay === -1 || curDay < e.endDay) { firewallIdx = i; break; }
+            }
+            if (firewallIdx < 0) {
+              st.events.unshift('Firewall deployed: no active NEXUS effects detected');
+              return;
+            }
+          }
+        }
+        if (actionId === 'em_targeted') {
+          if (!targetBorough || !st.countries[targetBorough]) {
+            st.events.unshift('Targeted outbreak requires selecting a borough');
+            return;
+          }
+        }
+
+        st.dna -= def.cost;
+        st.emergencyCooldowns[actionId] = curDay + def.cooldown;
+
+        // Handle instant/special actions
+        if (def.category === 'counter_nexus') {
+          const ai = st.aiDirector;
+          if (actionId === 'cn_firewall' && ai && firewallIdx >= 0) {
+            const removed = ai.activeEffects.splice(firewallIdx, 1)[0];
+            if (removed) {
+              // Also remove from disabled upgrades if it was infrastructure_attack
+              if (removed.actionId === 'infrastructure_attack') {
+                ai.disabledUpgrades = [];
+              }
+              st.events.unshift(`Firewall deployed: neutralized NEXUS ${removed.label}`);
+            }
+          } else if (actionId === 'cn_counter_evo' && ai) {
+            // Push knobs 5% toward neutral
+            ai.knobs.variantTransMultMul = clampAiKnob(decayTowardOne(ai.knobs.variantTransMultMul, 0.05));
+            ai.knobs.sigmaMul = clampAiKnob(decayTowardOne(ai.knobs.sigmaMul, 0.05));
+            ai.knobs.muBaseMul = clampAiKnob(decayTowardOne(ai.knobs.muBaseMul, 0.05));
+            st.events.unshift('Counter-Evolution deployed: NEXUS parameters neutralized');
+          } else if (actionId === 'cn_predict' && ai) {
+            // Reveal cooldown state - the UI will read this from the store
+            st.events.unshift('Predictive Analysis: NEXUS action cooldowns revealed');
+          }
+          return;
+        }
+
+        if (actionId === 'em_targeted' && targetBorough) {
+          const c = st.countries[targetBorough];
+          if (c) {
+            const seed = Math.min(c.S, 5000);
+            c.S -= seed;
+            c.E += seed;
+            st.events.unshift(`Targeted outbreak: 5k exposed seeded in ${c.name}`);
+          }
+          return;
+        }
+        if (actionId === 'em_cure_disrupt') {
+          st.cureProgress = Math.max(0, st.cureProgress - 2);
+          st.events.unshift('Cure disruption: research set back 2%');
+          return;
+        }
+
+        // Timed effects
+        if (def.duration > 0) {
+          st.activeEmergencyEffects.push({
+            actionId,
+            startDay: curDay,
+            endDay: curDay + def.duration,
+          });
+          st.events.unshift(`${def.name} activated for ${def.duration} days`);
+        }
+      }),
       bankPickup: (type, amount, ttlMs = 12_000) => set((st) => {
         if (st.bankedPickups.length >= MAX_BANKED_PICKUPS) {
           // drop oldest to preserve "grace buffer" feel without infinite stacking
@@ -892,8 +1138,8 @@ export const useGameStore = create<GameStore>()(
             let importMulUp = 1;
             let policyResistMulUp = 1;
             // base accrual by difficulty & mode
-            const baseDnaByDiff = state.difficulty === 'casual' ? 0.3 : state.difficulty === 'brutal' ? 0.15 : 0.2;
-            const baseOpsByDiff = state.difficulty === 'casual' ? 2.6 : state.difficulty === 'brutal' ? 1.6 : 2.0;
+            const baseDnaByDiff = state.difficulty === 'casual' ? 0.55 : state.difficulty === 'brutal' ? 0.30 : 0.40;
+            const baseOpsByDiff = state.difficulty === 'casual' ? 3.2 : state.difficulty === 'brutal' ? 2.0 : 2.6;
             let dnaRate = state.mode === 'architect' ? baseDnaByDiff : baseOpsByDiff; // per day
             let cureRateMul = 1;
             let cureAddPerDay = 0; // additive % per day from ops
@@ -917,8 +1163,10 @@ export const useGameStore = create<GameStore>()(
             let quarantineEffMul = 1;
             let reinfectionRate = 0;
             let asymptomaticSpreadMul = 1;
+            const disabledUps = state.aiDirector?.disabledUpgrades ?? [];
             for (const u of Object.values(state.upgrades)) {
               if (!u.purchased) continue;
+              if (disabledUps.includes(u.id)) continue; // NEXUS infrastructure_attack
               const e = u.effects;
               if (e.betaMul) betaMulUp *= e.betaMul;
               if (e.sigmaMul) sigmaMulUp *= e.sigmaMul;
@@ -951,22 +1199,51 @@ export const useGameStore = create<GameStore>()(
               if (e.quarantineEffMul) quarantineEffMul *= e.quarantineEffMul;
               if (e.reinfectionRate) reinfectionRate += e.reinfectionRate;
               if (e.asymptomaticSpreadMul) asymptomaticSpreadMul *= e.asymptomaticSpreadMul;
-            }
-            const p = state.params as any;
-            // seasonality
-            const season = 1 + p.seasonalityAmp * Math.cos(2 * Math.PI * ((state.day - p.seasonalityPhase) / 365));
-            const hospResp = HOSP_RESPONSE_TIERS[state.hospResponseTier];
-            const capPerPersonBase = (p.hospCapacityPerK / 1000) * hospCapacityMul;
-            const symFracEff = Math.max(0, Math.min(1, p.symFrac * symFracMulUp));
-            const symContactEff = Math.max(0, Math.min(1, p.symContactMul * symContactMulUp2));
-            const sevMobEff = Math.max(0, p.severityMobilityFactor * severityMobilityMulUp);
+	            }
+	            const p = state.params as any;
+	            const dayIndex = Math.floor(state.day);
+	            // seasonality
+	            const season = 1 + p.seasonalityAmp * Math.cos(2 * Math.PI * ((state.day - p.seasonalityPhase) / 365));
 
-            // AI Evolution Director knobs (virus-only, subtle multipliers).
-            const ai = state.aiDirector;
-            const aiOn = Boolean(ai?.enabled && state.pathogenType === 'virus');
-            const aiVariantMul = aiOn ? ai!.knobs.variantTransMultMul : 1;
-            const aiSigmaMul = aiOn ? ai!.knobs.sigmaMul : 1;
-            const aiMuMul = aiOn ? ai!.knobs.muBaseMul : 1;
+	            // AI Evolution Director knobs (virus-only, subtle multipliers).
+	            const ai = state.aiDirector;
+	            const aiOn = Boolean(ai?.enabled && state.pathogenType === 'virus');
+	            const aiVariantMul = aiOn ? ai!.knobs.variantTransMultMul : 1;
+	            const aiSigmaMul = aiOn ? ai!.knobs.sigmaMul : 1;
+	            const aiMuMul = aiOn ? ai!.knobs.muBaseMul : 1;
+
+	            // NEXUS active effects (action engine modifiers on top of LLM knobs).
+	            const nexusMods = aiOn && ai!.activeEffects.length > 0
+	              ? aggregateNexusEffects(ai!.activeEffects, dayIndex, state)
+	              : null;
+	            if (nexusMods) {
+	              betaMulUp *= nexusMods.betaMul;
+	              muMulUp *= nexusMods.muMul;
+	              hospCapacityMul *= nexusMods.hospCapacityMul;
+	              symFracMulUp *= nexusMods.symFracMul;
+	              detectionDelayAdd += nexusMods.detectionDelayAdd;
+	            }
+
+	            // Emergency action effects (player late-game repeatable abilities).
+	            for (const ea of state.activeEmergencyEffects) {
+	              const eDef = EMERGENCY_ACTIONS.find(a => a.id === ea.actionId);
+	              if (!eDef || dayIndex >= ea.endDay) continue;
+	              const ef = eDef.effects;
+	              if (ef.betaMul) betaMulUp *= ef.betaMul;
+	              if (ef.muMul) muMulUp *= ef.muMul;
+	              if (ef.hospCapacityMul) hospCapacityMul *= ef.hospCapacityMul;
+	              if (ef.dischargeMul) dischargeMulUp *= ef.dischargeMul;
+	              if (ef.cureRateMul) cureRateMul *= ef.cureRateMul;
+	              if (ef.cureAddPerDay) cureAddPerDay += ef.cureAddPerDay;
+	              if (ef.gammaRecMul) gammaRecMulUp *= ef.gammaRecMul;
+	            }
+
+	            // Derived values that depend on (potentially modified) multipliers.
+	            const hospResp = HOSP_RESPONSE_TIERS[state.hospResponseTier];
+	            const capPerPersonBase = (p.hospCapacityPerK / 1000) * hospCapacityMul;
+	            const symFracEff = Math.max(0, Math.min(1, p.symFrac * symFracMulUp));
+	            const symContactEff = Math.max(0, Math.min(1, p.symContactMul * symContactMulUp2));
+	            const sevMobEff = Math.max(0, p.severityMobilityFactor * severityMobilityMulUp);
 
             // Pathogen-type mechanics.
             const isFungusBurst = state.pathogenType === 'fungus' && state.fungusBurstDaysLeft > 0;
@@ -992,7 +1269,8 @@ export const useGameStore = create<GameStore>()(
               const symPrev = symFracEff * (c.I / N);
               const symContact = 1 - symPrev * (1 - symContactEff);
               const contactMul = policyContactMul * symContact;
-              const betaEff = p.beta * betaMulUp * (p.variantTransMult * aiVariantMul) * season * contactMul * fungusBetaMul * bioweaponBetaMul * (1 + (asymptomaticSpreadMul - 1) * (1 - symFracEff));
+              const nexusBoroBeta = nexusMods?.boroughBetaMul[c.id] ?? 1;
+              const betaEff = p.beta * betaMulUp * (p.variantTransMult * aiVariantMul) * season * contactMul * fungusBetaMul * bioweaponBetaMul * nexusBoroBeta * (1 + (asymptomaticSpreadMul - 1) * (1 - symFracEff));
               const sigma = (p.sigma * sigmaMulUp * aiSigmaMul) / Math.max(0.1, exposedDurationMul);
               const gammaRec = p.gammaRec * gammaRecMulUp;
               let mu = p.muBase * muMulUp * aiMuMul * bioweaponMuMul;
@@ -1086,6 +1364,28 @@ export const useGameStore = create<GameStore>()(
             // cure progress model (0..100)
             const totalPop = Object.values(state.countries).reduce((s, c) => s + c.pop, 0);
             const totalI = Object.values(state.countries).reduce((s, c) => s + c.I, 0);
+
+            // Architect: infections generate passive DNA (diminishing returns)
+            if (state.mode === 'architect') {
+              const infRatio = totalI / Math.max(1, totalPop);
+              state.dna += 0.3 * Math.sqrt(Math.min(1, infRatio * 10)) * dtDays;
+            }
+
+            // Milestone bonuses: one-time point grants at key thresholds
+            const msPrevDay = Math.floor(state.day - dtDays);
+            const msCurrDay = Math.floor(state.day);
+            const milestones = [
+              { day: 5, bonus: 2, msg: 'Early research grant: +2 points' },
+              { day: 15, bonus: 3, msg: 'Funding milestone: +3 points' },
+              { day: 30, bonus: 4, msg: 'Research breakthrough: +4 points' },
+              { day: 60, bonus: 5, msg: 'Major funding round: +5 points' },
+            ];
+            for (const m of milestones) {
+              if (msPrevDay < m.day && msCurrDay >= m.day) {
+                state.dna += m.bonus;
+                state.events.unshift(m.msg);
+              }
+            }
             // Mode-aware: controller has baseline research independent of prevalence
             const prevalenceTerm = 6 * (totalI / Math.max(1, totalPop)); // up to ~6%/day at full infection
             const baseModeRaw = state.mode === 'controller' ? 0.25 : 0.02; // % per day base
@@ -1174,10 +1474,86 @@ export const useGameStore = create<GameStore>()(
                 k.variantTransMultMul = clampAiKnob(decayTowardOne(k.variantTransMultMul, AI_DIRECTOR_CFG.dailyDecayTowardNeutral));
                 k.sigmaMul = clampAiKnob(decayTowardOne(k.sigmaMul, AI_DIRECTOR_CFG.dailyDecayTowardNeutral));
                 k.muBaseMul = clampAiKnob(decayTowardOne(k.muBaseMul, AI_DIRECTOR_CFG.dailyDecayTowardNeutral));
-              }
 
-              // Countdown transient systems once per day.
-              for (const k of Object.keys(state.cordonDaysLeft || {})) {
+                // NEXUS action engine: phase-based escalation with discrete visible actions.
+                const aiDir = state.aiDirector;
+                if (aiDir.enabled) {
+                  const curDay = Math.floor(state.day);
+	                  // Update phase (monotonic escalation: never de-escalate on cure setbacks)
+	                  const computedPhase = computeNexusPhase(curDay, state.cureProgress);
+	                  const PHASE_ORDER: Record<NexusPhase, number> = {
+	                    dormant: 0,
+	                    probing: 1,
+	                    adapting: 2,
+	                    aggressive: 3,
+	                    endgame: 4,
+	                  };
+	                  if (PHASE_ORDER[computedPhase] > PHASE_ORDER[aiDir.phase]) {
+	                    aiDir.phase = computedPhase;
+	                    if (computedPhase !== 'dormant') {
+	                      state.events.unshift(`NEXUS phase: ${computedPhase.toUpperCase()} — threat escalation detected`);
+	                    }
+	                  }
+
+	                  // Expire finished active effects
+	                  aiDir.activeEffects = aiDir.activeEffects.filter(e =>
+	                    e.endDay === -1 || curDay < e.endDay
+	                  );
+                  // Expire disabled upgrades whose infrastructure_attack effect ended
+                  aiDir.disabledUpgrades = aiDir.disabledUpgrades.filter(uid =>
+                    aiDir.activeEffects.some(e => e.actionId === 'infrastructure_attack')
+                  );
+
+                  // Try to select and execute a NEXUS action
+                  const result = maybeSelectNexusAction(state);
+                  if (result) {
+                    const { action, effect } = result;
+                    aiDir.activeEffects.push(effect);
+                    aiDir.lastActionDay = curDay;
+                    aiDir.nextEffectId = (aiDir.nextEffectId ?? 1) + 1;
+                    aiDir.actionCooldowns[action.id] = curDay + action.cooldownDays;
+                    aiDir.lastSurpriseDay = curDay;
+
+                    // Handle instant effects
+                    if (action.id === 'cross_borough_seeding') {
+                      const boroughIds = Object.keys(state.countries);
+                      const bId = boroughIds[effect.params.targetBorough] ?? boroughIds[0];
+                      const c = state.countries[bId];
+                      if (c) {
+                        const seed = Math.min(c.S, effect.params.seedExposed ?? 0);
+                        c.S -= seed;
+                        c.E += seed;
+                      }
+                    }
+                    if (action.id === 'treatment_resistance' || action.id === 'cure_sabotage') {
+                      const setback = effect.params.cureSetback ?? 0;
+                      state.cureProgress = Math.max(0, state.cureProgress - setback);
+                    }
+                    if (action.id === 'infrastructure_attack') {
+                      // Find a random purchased upgrade to disable
+                      const purchased = Object.values(state.upgrades).filter(u => u.purchased);
+                      if (purchased.length > 0) {
+                        const target = purchased[Math.floor(Math.random() * purchased.length)];
+                        if (!aiDir.disabledUpgrades.includes(target.id)) {
+                          aiDir.disabledUpgrades.push(target.id);
+                        }
+                      }
+                    }
+
+                    // Generate narrative event
+                    const narrative = generateNexusEventText(action.id, state);
+                    state.events.unshift(narrative);
+	                  }
+	                }
+	              }
+
+	              // Expire emergency effects (independent of AI director / pathogen type).
+	              state.activeEmergencyEffects = state.activeEmergencyEffects.filter(
+	                e => nowDay < e.endDay
+	              );
+
+	              // Countdown transient systems once per day.
+	              for (const k of Object.keys(state.cordonDaysLeft || {})) {
                 const days = state.cordonDaysLeft[k as any] || 0;
                 if (days <= 0) continue;
                 const next = days - 1;
@@ -1393,52 +1769,65 @@ export const useGameStore = create<GameStore>()(
         st.events.unshift(`Containment cordon deployed in ${c.name} (${days} days)`);
         while (st.events.length > MAX_EVENTS) st.events.pop();
       }),
-      saveGame: () => {
-        const st = get();
-        const snapshot = {
-          t: st.t,
-          day: st.day,
-          paused: st.paused,
-          speed: st.speed,
-          msPerDay: st.msPerDay,
-          pacing: st.pacing,
-          bubbleSpawnMs: st.bubbleSpawnMs,
-          dna: st.dna,
-          mode: st.mode,
-          pathogenType: st.pathogenType,
-          hospResponseTier: st.hospResponseTier,
-          mutationDebt: st.mutationDebt,
-          antibioticResistance: st.antibioticResistance,
-          fungusBurstDaysLeft: st.fungusBurstDaysLeft,
-          bioweaponVolatility: st.bioweaponVolatility,
-          cordonDaysLeft: st.cordonDaysLeft,
-          difficulty: st.difficulty,
-          cureProgress: st.cureProgress,
-          peakI: st.peakI,
-          story: st.story,
-          countries: st.countries,
-          selectedCountryId: st.selectedCountryId,
-          params: st.params,
-          upgrades: st.upgrades,
-          aiDirector: st.aiDirector ? { ...st.aiDirector, pending: false } : undefined,
-          events: st.events.slice(0, 20),
-          version: 1,
-        };
-        localStorage.setItem('gameSave', JSON.stringify(snapshot));
-      },
-      loadGame: () => {
-        const raw = localStorage.getItem('gameSave');
-        if (!raw) return;
-        try {
-          const snap = JSON.parse(raw);
-          set((st) => {
-            st.t = snap.t ?? st.t;
-            st.day = snap.day ?? st.day;
-            st.paused = snap.paused ?? st.paused;
-            st.speed = snap.speed ?? st.speed;
-            st.msPerDay = snap.msPerDay ?? st.msPerDay;
-            st.pacing = snap.pacing ?? st.pacing;
-            st.bubbleSpawnMs = snap.bubbleSpawnMs ?? st.bubbleSpawnMs;
+	      saveGame: () => {
+	        try {
+	          const st = get();
+	          const snapshot = {
+	            t: st.t,
+	            day: st.day,
+	            paused: st.paused,
+	            awaitingPatientZero: Boolean(st.awaitingPatientZero),
+	            patientZeroSeedAmount: (st as any).patientZeroSeedAmount ?? null,
+	            speed: st.speed,
+	            msPerDay: st.msPerDay,
+	            pacing: st.pacing,
+	            bubbleSpawnMs: st.bubbleSpawnMs,
+	            dna: st.dna,
+	            mode: st.mode,
+	            pathogenType: st.pathogenType,
+	            hospResponseTier: st.hospResponseTier,
+	            mutationDebt: st.mutationDebt,
+	            antibioticResistance: st.antibioticResistance,
+	            fungusBurstDaysLeft: st.fungusBurstDaysLeft,
+	            bioweaponVolatility: st.bioweaponVolatility,
+	            cordonDaysLeft: st.cordonDaysLeft,
+	            difficulty: st.difficulty,
+	            cureProgress: st.cureProgress,
+	            peakI: st.peakI,
+	            story: st.story,
+	            countries: st.countries,
+	            selectedCountryId: st.selectedCountryId,
+	            params: st.params,
+	            upgrades: st.upgrades,
+	            aiDirector: st.aiDirector ? { ...st.aiDirector, pending: false } : undefined,
+	            events: st.events.slice(0, 20),
+	            version: 1,
+	          };
+	          localStorage.setItem('gameSave', JSON.stringify(snapshot));
+	        } catch {}
+	      },
+	      loadGame: () => {
+	        try {
+	          const raw = localStorage.getItem('gameSave');
+	          if (!raw) return;
+	          const snap = JSON.parse(raw);
+	          set((st) => {
+	            st.t = snap.t ?? st.t;
+	            st.day = snap.day ?? st.day;
+	            st.paused = snap.paused ?? st.paused;
+	            if (Object.prototype.hasOwnProperty.call(snap, 'awaitingPatientZero')) {
+	              st.awaitingPatientZero = Boolean((snap as any).awaitingPatientZero);
+	            } else {
+	              // Back-compat for older saves.
+	              st.awaitingPatientZero = false;
+	            }
+	            if (typeof (snap as any).patientZeroSeedAmount === 'number' && Number.isFinite((snap as any).patientZeroSeedAmount)) {
+	              (st as any).patientZeroSeedAmount = (snap as any).patientZeroSeedAmount;
+	            }
+	            st.speed = snap.speed ?? st.speed;
+	            st.msPerDay = snap.msPerDay ?? st.msPerDay;
+	            st.pacing = snap.pacing ?? st.pacing;
+	            st.bubbleSpawnMs = snap.bubbleSpawnMs ?? st.bubbleSpawnMs;
             st.dna = snap.dna ?? st.dna;
             st.countries = snap.countries ?? st.countries;
             st.selectedCountryId = snap.selectedCountryId ?? st.selectedCountryId;
@@ -1506,6 +1895,8 @@ export const useGameStore = create<GameStore>()(
         st.fungusBurstDaysLeft = 0;
         st.bioweaponVolatility = 0;
         st.cordonDaysLeft = {};
+        st.activeEmergencyEffects = [];
+        st.emergencyCooldowns = {};
         st.bankedPickups = [];
         st.cureProgress = 0;
         st.params = paramsForType(st.pathogenType);

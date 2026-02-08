@@ -2,6 +2,34 @@ import React from 'react';
 import { useGameStore } from '../../state/store';
 import { useUiStore } from '../../state/ui';
 import { motion, AnimatePresence } from 'framer-motion';
+import { Tooltip } from '../system/Tooltip';
+import type { AiDirectorMood, NexusPhase } from '../../state/types';
+
+function formatNumber(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return n.toFixed(0);
+}
+
+function moodColor(mood?: AiDirectorMood | string): string {
+  switch (mood) {
+    case 'scheming': return '#fbbf24';
+    case 'aggressive': return '#ef4444';
+    case 'desperate': return '#a855f7';
+    case 'triumphant': return '#22c55e';
+    default: return '#94a3b8';
+  }
+}
+
+function phaseColor(phase?: NexusPhase | string): string {
+  switch (phase) {
+    case 'probing': return '#60a5fa';
+    case 'adapting': return '#fbbf24';
+    case 'aggressive': return '#f97316';
+    case 'endgame': return '#ef4444';
+    default: return '#64748b';
+  }
+}
 
 function Ring({ value, color = '#ef4444', size = 64, stroke = 8, label }: { value: number; color?: string; size?: number; stroke?: number; label?: string }) {
   const r = (size - stroke) / 2;
@@ -30,6 +58,8 @@ export function IntelPanel() {
   const cordonDaysLeft = useGameStore((s) => s.cordonDaysLeft);
   const dna = useGameStore((s) => s.dna);
   const upgrades = useGameStore((s) => s.upgrades);
+  const aiDirector = useGameStore((s) => s.aiDirector);
+  const day = useGameStore((s) => Math.floor(s.day));
   const hudCompact = useUiStore((s) => (s as any).hudCompact as boolean);
   const [expanded, setExpanded] = React.useState(!hudCompact);
   React.useEffect(() => { setExpanded(!hudCompact); }, [hudCompact]);
@@ -92,20 +122,39 @@ export function IntelPanel() {
       </div>
       <div className="row" style={{ gap: 12 }}>
         <div style={{ textAlign: 'center' }}>
-          <Ring value={iRate} color="#ef4444" label={`${(iRate*100).toFixed(2)}% I`} />
+          <Ring value={iRate} color="#ef4444" label={`${(iRate*100).toFixed(1)}%`} />
           <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>Global Infected</div>
         </div>
         <div style={{ textAlign: 'center' }}>
-          <Ring value={hRate * 6} color="#60a5fa" label={`${(hRate*100).toFixed(2)}% H`} />
+          <Ring value={hRate * 6} color="#60a5fa" label={`${(hRate*100).toFixed(2)}%`} />
           <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>Hospitalized</div>
         </div>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', rowGap: 4, columnGap: 8 }}>
-        <div>S</div><div style={{ textAlign: 'right' }}>{totals.S.toFixed(0)}</div>
-        <div>E</div><div style={{ textAlign: 'right' }}>{totals.E.toFixed(0)}</div>
-        <div style={{ color: 'var(--i)' }}>I</div><div style={{ textAlign: 'right', color: 'var(--i)' }}>{totals.I.toFixed(0)}</div>
-        <div>R</div><div style={{ textAlign: 'right' }}>{totals.R.toFixed(0)}</div>
-        <div>D</div><div style={{ textAlign: 'right' }}>{totals.D.toFixed(0)}</div>
+        <Tooltip label="People not yet exposed to the pathogen">
+          <div style={{ cursor: 'help' }}>Susceptible</div>
+        </Tooltip>
+        <div style={{ textAlign: 'right' }}>{formatNumber(totals.S)}</div>
+
+        <Tooltip label="Exposed but not yet infectious (incubating)">
+          <div style={{ cursor: 'help', color: 'var(--e)' }}>Exposed</div>
+        </Tooltip>
+        <div style={{ textAlign: 'right', color: 'var(--e)' }}>{formatNumber(totals.E)}</div>
+
+        <Tooltip label="Currently infectious and spreading the pathogen">
+          <div style={{ cursor: 'help', color: 'var(--i)' }}>Infected</div>
+        </Tooltip>
+        <div style={{ textAlign: 'right', color: 'var(--i)' }}>{formatNumber(totals.I)}</div>
+
+        <Tooltip label="Recovered and immune (for now)">
+          <div style={{ cursor: 'help' }}>Recovered</div>
+        </Tooltip>
+        <div style={{ textAlign: 'right' }}>{formatNumber(totals.R)}</div>
+
+        <Tooltip label="Fatalities from the pathogen">
+          <div style={{ cursor: 'help' }}>Deaths</div>
+        </Tooltip>
+        <div style={{ textAlign: 'right' }}>{formatNumber(totals.D)}</div>
       </div>
       <div style={{ marginTop: 6 }}>
         <div className="row" style={{ justifyContent: 'space-between' }}>
@@ -116,6 +165,113 @@ export function IntelPanel() {
           <div className="progress-fill" style={{ width: `${Math.floor(subsystem.frac * 100)}%`, background: subsystem.color, boxShadow: 'none' }} />
         </div>
       </div>
+
+      {/* NEXUS AI Director Status */}
+      {aiDirector?.enabled && (
+        <div style={{ marginTop: 8 }}>
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+            <span className="muted" style={{ fontSize: 12, letterSpacing: 1 }}>NEXUS</span>
+            <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+              {aiDirector.phase && aiDirector.phase !== 'dormant' && (
+                <span className="badge" style={{
+                  background: phaseColor(aiDirector.phase),
+                  color: '#000',
+                  fontSize: 9,
+                  padding: '1px 5px',
+                  textTransform: 'uppercase',
+                  letterSpacing: 0.5,
+                }}>
+                  {aiDirector.phase}
+                </span>
+              )}
+              <span className="badge" style={{
+                background: moodColor(aiDirector.mood),
+                color: '#000',
+                fontSize: 10,
+                padding: '2px 6px',
+              }}>
+                {(aiDirector.mood ?? 'calm').toUpperCase()}
+              </span>
+            </div>
+          </div>
+
+          {/* NEXUS Taunt */}
+          {aiDirector.taunt && (
+            <div style={{
+              marginTop: 6,
+              padding: '6px 8px',
+              background: 'rgba(239, 68, 68, 0.08)',
+              borderLeft: `2px solid ${moodColor(aiDirector.mood)}`,
+              borderRadius: 4,
+              fontSize: 11,
+              color: moodColor(aiDirector.mood),
+              fontWeight: 500,
+            }}>
+              &ldquo;{aiDirector.taunt}&rdquo;
+            </div>
+          )}
+          {!aiDirector.taunt && aiDirector.moodNote && (
+            <div style={{
+              marginTop: 4,
+              fontSize: 11,
+              fontStyle: 'italic',
+              color: 'var(--warn)',
+              opacity: 0.9,
+            }}>
+              &ldquo;{aiDirector.moodNote}&rdquo;
+            </div>
+          )}
+
+          {/* Intercepted Transmission */}
+          {aiDirector.internalMonologue && (
+            <div style={{
+              marginTop: 4,
+              fontSize: 10,
+              color: '#64748b',
+              fontFamily: 'monospace',
+            }}>
+              <span style={{ color: '#475569', fontWeight: 600 }}>[INTERCEPTED]</span> {aiDirector.internalMonologue}
+            </div>
+          )}
+
+          {aiDirector.strategicFocus && (
+            <div className="muted" style={{ fontSize: 11, marginTop: 2 }}>
+              Targeting: {aiDirector.strategicFocus}
+            </div>
+          )}
+
+          {/* Active NEXUS Effects */}
+          {(aiDirector.activeEffects?.length ?? 0) > 0 && (
+            <div style={{ marginTop: 4 }}>
+              {aiDirector.activeEffects!.filter(e => e.endDay === -1 || day < e.endDay).map((e) => {
+                const remaining = e.endDay === -1 ? 'permanent' : `${Math.max(0, e.endDay - day)}d`;
+                return (
+                  <div key={e.id} style={{ fontSize: 10, color: '#ef4444', display: 'flex', justifyContent: 'space-between' }}>
+                    <span>{e.label}</span>
+                    <span style={{ color: '#94a3b8' }}>{remaining}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <Tooltip label="How threatened NEXUS feels by your progress">
+            <div>
+              <div className="progress-track" style={{ height: 4, marginTop: 6, cursor: 'help' }}>
+                <div className="progress-fill" style={{
+                  width: `${Math.floor((aiDirector.playerThreatLevel ?? 0) * 100)}%`,
+                  background: 'var(--warn)',
+                  boxShadow: 'none',
+                }} />
+              </div>
+              <div className="muted" style={{ fontSize: 10, marginTop: 2 }}>
+                Threat assessment: {Math.round((aiDirector.playerThreatLevel ?? 0) * 100)}%
+              </div>
+            </div>
+          </Tooltip>
+        </div>
+      )}
+
       <hr style={{ borderColor: 'var(--border)', width: '100%' }} />
       <strong>Selected</strong>
       {sel ? (
@@ -125,7 +281,13 @@ export function IntelPanel() {
             <span className="muted">Pop {sel.pop.toLocaleString()}</span>
           </div>
           <div className="row" style={{ justifyContent: 'space-between' }}>
-            <span>I</span><span style={{ color: 'var(--i)' }}>{sel.I.toFixed(0)}</span>
+            <span style={{ color: 'var(--i)' }}>Infected</span><span style={{ color: 'var(--i)' }}>{formatNumber(sel.I)}</span>
+          </div>
+          <div className="row" style={{ justifyContent: 'space-between' }}>
+            <span style={{ color: '#60a5fa' }}>Hospitalized</span><span style={{ color: '#60a5fa' }}>{formatNumber(sel.H)}</span>
+          </div>
+          <div className="row" style={{ justifyContent: 'space-between' }}>
+            <span>Deaths</span><span>{formatNumber(sel.D)}</span>
           </div>
           <div className="row" style={{ justifyContent: 'space-between' }}>
             <label htmlFor="policy2">Policy</label>

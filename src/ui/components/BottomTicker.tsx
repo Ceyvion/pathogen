@@ -5,6 +5,7 @@ import { useUiStore } from '../../state/ui';
 
 function categorize(e: string): { icon: JSX.Element; label: string } {
   const t = e.toLowerCase();
+  if (t.startsWith('nexus')) return { icon: <Skull size={14} color="#ef4444" />, label: 'NEXUS' };
   if (t.startsWith('victory')) return { icon: <Trophy size={14} color="#fbbf24" />, label: 'Victory' };
   if (t.includes('patient zero')) return { icon: <Biohazard size={14} color="#ef4444" />, label: 'Outbreak' };
   if (t.startsWith('day ')) return { icon: <Activity size={14} color="#22d3ee" />, label: 'Daily' };

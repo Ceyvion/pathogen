@@ -42,7 +42,7 @@ export function RightLabDrawer() {
           </div>
         </div>
         {u.desc && <div className="muted" style={{ marginTop: 4 }}>{u.desc}</div>}
-        {locked && <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>Requires: {u.prereqs?.join(', ')}</div>}
+        {locked && <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>Requires: {u.prereqs?.map(pid => upgrades[pid]?.name ?? pid).join(', ')}</div>}
       </div>
     );
   };

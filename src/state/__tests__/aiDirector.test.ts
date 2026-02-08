@@ -101,18 +101,18 @@ describe('AI Director', () => {
       seedAmount: 6000,
     });
 
-    await advanceToDayIndex(4);
+    await advanceToDayIndex(2);
     expect(fetchMock).not.toHaveBeenCalled();
 
-    await advanceToDayIndex(5);
+    await advanceToDayIndex(3);
     await waitFor(() => Boolean(useGameStore.getState().aiDirector && !useGameStore.getState().aiDirector!.pending));
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const ai = useGameStore.getState().aiDirector!;
-    expect(ai.knobs.variantTransMultMul).toBeCloseTo(1.03, 4);
-    expect(ai.knobs.sigmaMul).toBeCloseTo(0.97, 4);
-    expect(ai.knobs.muBaseMul).toBeCloseTo(1.03, 4);
-    expect(useGameStore.getState().events.some((e) => e.includes('AI variant drift'))).toBe(true);
+    expect(ai.knobs.variantTransMultMul).toBeCloseTo(1.07, 4);
+    expect(ai.knobs.sigmaMul).toBeCloseTo(0.93, 4);
+    expect(ai.knobs.muBaseMul).toBeCloseTo(1.07, 4);
+    expect(useGameStore.getState().events.some((e) => e.includes('NEXUS'))).toBe(true);
   });
 
   it('controller mode never increases lethality (muBaseMul)', async () => {
@@ -187,5 +187,73 @@ describe('AI Director', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(ai.enabled).toBe(false);
     expect(useGameStore.getState().events.some((e) => e.includes('AI director disabled'))).toBe(true);
+  });
+
+  it('does not stack suggestedActions with a local NEXUS action on the same in-game day', async () => {
+    let releaseFetch: () => void = () => { throw new Error('fetch gate not initialized'); };
+    const fetchGate = new Promise<void>((resolve) => { releaseFetch = () => resolve(); });
+
+    const decision = {
+      version: 1,
+      note: 'suggested action',
+      intent: 'hold',
+      knobs: {},
+      suggestedActions: ['superspreader_event'],
+    };
+
+    const fetchMock = vi.fn(async () => {
+      await fetchGate;
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ decision }),
+      };
+    }) as any;
+    vi.stubGlobal('fetch', fetchMock);
+
+    useGameStore.getState().actions.startNewGame('architect', {
+      pathogenType: 'virus',
+      aiDirectorEnabled: true,
+      seedMode: 'random',
+      seedTarget: 'queens',
+      seedAmount: 6000,
+    });
+
+    await advanceToDayIndex(3);
+    await waitFor(() => fetchMock.mock.calls.length === 1);
+
+    // Force NEXUS into a non-dormant phase, and simulate that a local action already occurred today.
+    const curDay = Math.floor(useGameStore.getState().day);
+    useGameStore.setState((st) => {
+      if (!st.aiDirector) return;
+      st.aiDirector.phase = 'probing';
+      st.aiDirector.lastActionDay = curDay;
+    });
+
+    releaseFetch();
+    await waitFor(() => Boolean(useGameStore.getState().aiDirector && !useGameStore.getState().aiDirector!.pending));
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const ai = useGameStore.getState().aiDirector!;
+    expect(ai.activeEffects.length).toBe(0);
+  });
+
+  it('keeps NEXUS phase monotonic when cure progress drops', async () => {
+    useGameStore.getState().actions.startNewGame('architect', {
+      pathogenType: 'virus',
+      aiDirectorEnabled: true,
+      seedMode: 'random',
+      seedTarget: 'queens',
+      seedAmount: 6000,
+    });
+
+    // Force endgame via cure progress, then simulate a cure setback.
+    useGameStore.setState((st) => { st.cureProgress = 80; });
+    await advanceToDayIndex(1);
+    expect(useGameStore.getState().aiDirector?.phase).toBe('endgame');
+
+    useGameStore.setState((st) => { st.cureProgress = 0; });
+    await advanceToDayIndex(2);
+    expect(useGameStore.getState().aiDirector?.phase).toBe('endgame');
   });
 });

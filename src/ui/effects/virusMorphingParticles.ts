@@ -41,8 +41,9 @@ import {
   hash,
   instanceIndex,
   ivec2,
+  length,
+  max,
   mix,
-  pow,
   smoothstep,
   texture,
   time,
@@ -70,6 +71,35 @@ type MorphTextures = {
   positions: DataArrayTexture;
   uvs: DataArrayTexture;
 };
+
+async function measureRafIntervalMs(frames = 12): Promise<number> {
+  if (typeof requestAnimationFrame !== 'function') return 1000 / 60;
+
+  return await new Promise<number>((resolve) => {
+    const samples: number[] = [];
+    let count = 0;
+    let last = performance.now();
+
+    const step = (now: number) => {
+      const dt = now - last;
+      last = now;
+      if (count > 0) samples.push(dt); // skip first frame
+      count++;
+
+      if (count >= frames) {
+        samples.sort((a, b) => a - b);
+        const median = samples[Math.floor(samples.length / 2)] ?? (1000 / 60);
+        // Clamp to a reasonable UI range.
+        resolve(Math.min(33.3, Math.max(4, median)));
+        return;
+      }
+
+      requestAnimationFrame(step);
+    };
+
+    requestAnimationFrame(step);
+  });
+}
 
 function createSolidTexture(color: ColorRepresentation): DataTexture {
   const c = new Color(color);
@@ -236,10 +266,14 @@ export async function startVirusMorphingParticles(
   const rect = canvas.getBoundingClientRect();
   if (!rect.width || !rect.height) throw new Error('Canvas has no size.');
 
+  // Estimate display refresh cadence (without render work) so we don't chase an
+  // impossible target on 60Hz screens.
+  const baselineRafMs = await measureRafIntervalMs(12);
+
   const renderer = new WebGPURenderer({
     canvas,
     powerPreference: 'high-performance',
-    antialias: true,
+    antialias: false,
     alpha: true,
     stencil: false,
   });
@@ -292,9 +326,6 @@ export async function startVirusMorphingParticles(
     oscillationAmplitude: uniform(0.02),
     oscillationSpeed: uniform(0.08),
     particleSize: uniform(0.052),
-    particleGlowSpread: uniform(0.42),
-    particleAlphaCutoff: uniform(0.23),
-    particleSharpness: uniform(5.0),
   };
 
   // Decode instance -> texel coordinate.
@@ -350,19 +381,34 @@ export async function startVirusMorphingParticles(
     .mul(mid)
     .mul(uniforms.animationChaosAmplitude);
 
-  const positionNode = mix(posA, posB, progress).add(chaos).add(osc);
+  // Base morph position.
+  const basePos = mix(posA, posB, progress);
+
+  // Spike bursts: per-particle outward pulses that peak mid-morph.
+  const spikeNoise = texture(
+    noiseTex,
+    randUv.add(time.mul(0.06)),
+  ).r;
+  const spikeMask = spikeNoise
+    .mul(spikeNoise)
+    .mul(spikeNoise)
+    .mul(spikeNoise); // ^4 using multiplies (cheaper than pow)
+  const dirLen = max(length(basePos), 0.001);
+  const dir = basePos.div(dirLen);
+  const spikeStrength = mid.mul(mid).mul(spikeMask).mul(0.22);
+  const spikes = dir.mul(spikeStrength);
+
+  const positionNode = basePos.add(chaos).add(osc).add(spikes);
 
   // Particle size.
   const currentSize = mix(shapeA.a, shapeB.a, progress);
   const scaleNode = uniforms.particleSize.mul(currentSize);
 
-  // Particle sprite shape.
+  // Particle sprite shape (cheap disc with a soft edge).
   const dist = uv().distance(0.5);
-  const glow = uniforms.particleGlowSpread.div(dist);
-  const sharp = pow(glow, uniforms.particleSharpness);
-  const opacityNode = sharp
-    .sub(uniforms.particleAlphaCutoff.mul(uniforms.particleSharpness))
-    .clamp(0, 1);
+  const radius = 0.48;
+  const softEdge = 0.08;
+  const opacityNode = smoothstep(radius - softEdge, radius, dist).oneMinus();
 
   // Particle colors.
   const colorA = texture(uniforms.mapA, uvA.xy);
@@ -372,6 +418,7 @@ export async function startVirusMorphingParticles(
   const material = new SpriteNodeMaterial();
   material.transparent = true;
   material.depthWrite = false;
+  material.alphaTest = 0.02;
   material.blending = AdditiveBlending;
   material.positionNode = positionNode;
   material.scaleNode = scaleNode;
@@ -395,11 +442,13 @@ export async function startVirusMorphingParticles(
   let lastPxW = 0;
   let lastPxH = 0;
   let lastDpr = 0;
+  let renderScale = 1.0;
   const resize = () => {
     const r = canvas.getBoundingClientRect();
     if (!r.width || !r.height) return;
 
-    const dpr = Math.min(window.devicePixelRatio || 1, qualityMaxDpr(quality));
+    const dprCap = Math.min(window.devicePixelRatio || 1, qualityMaxDpr(quality));
+    const dpr = dprCap * renderScale;
     const pxW = Math.max(1, Math.floor(r.width * dpr));
     const pxH = Math.max(1, Math.floor(r.height * dpr));
     if (pxW === lastPxW && pxH === lastPxH && dpr === lastDpr) return;
@@ -433,10 +482,51 @@ export async function startVirusMorphingParticles(
   let raf = 0;
   let stopped = false;
 
+  // Adaptive scaling state. Keeps this effect lightweight on weaker GPUs while
+  // chasing high refresh rates on capable hardware.
+  const fpsTarget = 120;
+  const targetMs = Math.max(1000 / fpsTarget, baselineRafMs);
+  let emaMs = 1000 / 60;
+  let lastFrameMs = performance.now();
+  let lastTuneMs = lastFrameMs;
+  const adapt = (nowMs: number) => {
+    const dt = nowMs - lastFrameMs;
+    lastFrameMs = nowMs;
+    emaMs = emaMs * 0.9 + dt * 0.1;
+
+    if (nowMs - lastTuneMs < 250) return;
+    lastTuneMs = nowMs;
+
+    const hi = targetMs * 1.1;
+    const lo = targetMs * 0.9;
+    let next = renderScale;
+    if (emaMs > hi) next = Math.max(0.6, renderScale - 0.05);
+    else if (emaMs < lo) next = Math.min(1.0, renderScale + 0.05);
+
+    if (next !== renderScale) {
+      renderScale = next;
+      resize();
+    }
+  };
+
   const animate = () => {
     if (stopped) return;
 
     const now = performance.now();
+    // Reduce unnecessary GPU usage and avoid huge time deltas when returning.
+    if (typeof document !== 'undefined' && document.hidden) {
+      phaseStart = now;
+      lastFrameMs = now;
+      lastTuneMs = now;
+      emaMs = targetMs;
+      raf = requestAnimationFrame(animate);
+      return;
+    }
+
+    // Adaptive internal resolution scaling to chase high refresh rates.
+    // (Actual fps is capped by display refresh.)
+    adapt(now);
+
     const elapsed = now - phaseStart;
 
     if (phase === 0) {

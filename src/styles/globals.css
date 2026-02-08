@@ -121,7 +121,6 @@ body {
 [data-theme="light"] .virus-morphing-backdrop {
   opacity: 0.55;
   mix-blend-mode: multiply;
-  filter: saturate(1.35) contrast(1.08);
 }
 [data-theme="hc"] .virus-morphing-backdrop { display: none; }
 /* Grid texture — like graph paper on a classified document */

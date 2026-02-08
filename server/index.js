@@ -132,9 +132,23 @@ async function start() {
   }
 
   const port = Number(process.env.PORT || 5173);
-  app.listen(port, () => {
+  const server = app.listen(port, () => {
     // eslint-disable-next-line no-console
     console.log(`[server] listening on http://localhost:${port} (${isProd ? 'prod' : 'dev'})`);
+  });
+  server.on('error', (err) => {
+    if (err && typeof err === 'object' && 'code' in err && err.code === 'EADDRINUSE') {
+      // eslint-disable-next-line no-console
+      console.error(`[server] Port ${port} is already in use.`);
+      // eslint-disable-next-line no-console
+      console.error(`[server] Stop the existing process or choose a new port, e.g.: PORT=5174 pnpm dev`);
+      // eslint-disable-next-line no-console
+      console.error(`[server] To find what's using it: lsof -i :${port} -nP`);
+      process.exit(1);
+    }
+    // eslint-disable-next-line no-console
+    console.error(err);
+    process.exit(1);
   });
 }
 

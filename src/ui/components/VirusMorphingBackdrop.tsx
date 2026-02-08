@@ -15,6 +15,7 @@ export function VirusMorphingBackdrop({ tone = 'neutral', quality, className }: 
     // Title/setup screens are UI-heavy; bias towards stable FPS.
     if (typeof window === 'undefined') return 'medium';
     if (window.innerWidth < 760) return 'low';
+    if ((window.devicePixelRatio || 1) > 1.25) return 'low';
     return 'medium';
   }, [quality]);
 
@@ -60,4 +61,3 @@ export function VirusMorphingBackdrop({ tone = 'neutral', quality, className }: 
     />
   );
 }
-

@@ -14,10 +14,14 @@ async function advanceToDayIndex(targetDayIndex: number) {
   const a = useGameStore.getState().actions;
   a.setSpeed(10);
   a.setPacing('fast'); // msPerDay=5000 (fewer loops)
-  while (Math.floor(useGameStore.getState().t / useGameStore.getState().msPerDay) < targetDayIndex) {
+  let safety = 0;
+  while (Math.floor(useGameStore.getState().day) < targetDayIndex) {
+    // Auto-unpause if game auto-paused (milestones, game over, etc.)
+    if (useGameStore.getState().paused) a.setPaused(false);
     a.tick(200);
     // Let any queued async director work start.
     await Promise.resolve();
+    if (++safety > 50_000) break; // safety valve
   }
 }
 

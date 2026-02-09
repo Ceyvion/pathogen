@@ -1,5 +1,46 @@
 # TODO
 
+## Task: Review "10 Improvements" Implementation (2026-02-09)
+
+## Plan
+
+- [x] Inspect actual diffs for new/modified files (scoring, milestones, gameover routing, auto-pause, tutorial, HUD controls).
+- [x] Run `pnpm check`, `pnpm test --run`, `pnpm build` to catch typing/regressions.
+- [x] Manually sanity-check high-risk flows: milestone trigger dedupe, pause/unpause, gameover transition, localStorage usage, keyboard shortcuts cleanup.
+- [x] Record findings (bugs, edge cases, or "looks good but watch X") in Review.
+
+## Verification
+
+- [x] `pnpm check`
+- [x] `pnpm test --run`
+- [x] `pnpm build`
+
+## Review
+
+- Fixed a real gameplay bug: milestones / auto-pause / gameover could set `state.paused = true` mid-tick, but the sim loop would keep integrating the remaining accumulated time. Now `tick()` stops integrating immediately when `paused` flips inside the step.
+- Fixed persistence edge cases: new fields (`milestonesTriggered`, `emergencyUnlocked`, `pauseReason`, `autoPauseEnabled`, emergency effect state, `gameResult`, `autoCollectBubbles`) are now included in save/load so reloads do not re-trigger milestone rewards or hide unlocked emergency actions.
+- Added regression coverage for both in `src/state/__tests__/autoPause.test.ts`.
+
+## Task: Fix In-Game Day Drift When Pacing Changes (2026-02-08)
+
+## Plan
+
+- [x] Make `state.day` the single source of truth for "day index" everywhere (UI, AI director, daily tick boundaries).
+- [x] Add regression coverage: changing pacing mid-run must not make `dayIndex` jump backwards/forwards or mislabel daily events.
+- [x] Run `pnpm check`, `pnpm test --run`, `pnpm build`.
+
+## Verification
+
+- [x] `pnpm check`
+- [x] `pnpm test --run`
+- [x] `pnpm build`
+
+## Review
+
+- Fixed a pacing-dependent bug where multiple systems derived "day index" from `t / msPerDay`, causing the displayed day and AI cadence to jump when pacing changed.
+- Standardized on `state.day` for UI day display, AI director dayIndex, and daily boundary logic.
+- Added a regression test ensuring AI director snapshots use `state.day` even after a pacing change.
+
 ## Task: Map Fails To Load After Reload (2026-02-08)
 
 ## Plan

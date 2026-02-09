@@ -150,6 +150,7 @@ export function RightUpgrades() {
   const dna = useGameStore((s) => s.dna);
   const mode = useGameStore((s) => s.mode);
   const purchase = useGameStore((s) => s.actions.purchaseUpgrade);
+  const emergencyUnlocked = useGameStore((s) => s.emergencyUnlocked);
 
   const allPurchased = useMemo(() =>
     Object.values(upgrades).every(u => u.purchased),
@@ -185,11 +186,11 @@ export function RightUpgrades() {
   return (
     <div className="panel glass right-panel">
       <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-        <strong>{allPurchased ? 'Arsenal' : 'Upgrades'}</strong>
+        <strong>{emergencyUnlocked ? 'Arsenal' : 'Upgrades'}</strong>
         <span className="muted">{mode === 'architect' ? 'DNA' : 'Ops'}: {dna.toFixed(1)}</span>
       </div>
 
-      {allPurchased && <EmergencyActionsPanel />}
+      {emergencyUnlocked && <EmergencyActionsPanel />}
 
       {(['transmission','symptoms','abilities'] as const).map((branch) => (
         <div key={branch} style={{ marginBottom: 12 }}>

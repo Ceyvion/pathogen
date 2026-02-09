@@ -276,6 +276,12 @@ export interface WorldState {
   // Late-game emergency actions
   activeEmergencyEffects: ActiveEmergencyEffect[];
   emergencyCooldowns: Record<string, number>; // actionId -> day when available again
+  // Game flow
+  gameResult: GameEndStats | null;
+  milestonesTriggered: string[];
+  pauseReason: string | null;
+  autoPauseEnabled: boolean;
+  emergencyUnlocked: boolean; // whether emergency actions are available
 }
 
 export interface TravelEdge { from: CountryID; to: CountryID; daily: number; }
@@ -300,3 +306,38 @@ export interface Story {
 
 export type GeneId = 'atp_boost' | 'efficient_bureaucracy' | 'urban_adaptation';
 export interface Gene { id: GeneId; name: string; desc: string; category: 'dna'|'ops'|'env'; }
+
+// Post-game result
+export type GameOutcome = 'victory' | 'defeat';
+export type LetterGrade = 'S' | 'A' | 'B' | 'C' | 'D' | 'F';
+
+export interface GameEndStats {
+  outcome: GameOutcome;
+  days: number;
+  totalDeaths: number;
+  totalRecovered: number;
+  totalInfected: number;
+  peakInfected: number;
+  cureProgress: number;
+  upgradesPurchased: number;
+  totalUpgrades: number;
+  mode: GameMode;
+  pathogenType: PathogenType;
+  difficulty: 'casual' | 'normal' | 'brutal';
+  score: number;
+  grade: LetterGrade;
+}
+
+// Milestone system
+export interface Milestone {
+  id: string;
+  condition: (st: WorldState) => boolean;
+  title: string;
+  narrative: string;
+  reward?: { type: BubbleType; amount: number };
+  autoPause?: boolean;
+  modes?: GameMode[]; // if undefined, applies to both
+}
+
+// Crisis tier for UI escalation
+export type CrisisTier = 'calm' | 'watch' | 'surge' | 'crisis';

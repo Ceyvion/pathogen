@@ -1,13 +1,15 @@
 import { create } from 'zustand';
 import { playMilestone } from '../audio/sfx';
 import { immer } from 'zustand/middleware/immer';
-import type { Country, CountryID, TravelEdge, Upgrade, WorldState, GameMode, Story, GeneId, BubbleType, PathogenType, BankedPickup, Params, AiDirectorDecision, AiDirectorKnobs, AiDirectorState, HospResponseTier, NexusPhase, NexusActionId, EmergencyAction } from './types';
+import type { Country, CountryID, TravelEdge, Upgrade, WorldState, GameMode, Story, GeneId, BubbleType, PathogenType, BankedPickup, Params, AiDirectorDecision, AiDirectorKnobs, AiDirectorState, HospResponseTier, NexusPhase, NexusActionId, EmergencyAction, GameEndStats } from './types';
 import { STORIES } from '../story/stories';
 import { maybeGenerateWorldEvent } from '../events/worldEvents';
 import { computeDirection, computeVirusDirectorSnapshot } from '../sim/aiDirectorMetrics';
 import { HOSP_RESPONSE_TIERS, nextHospResponseTier } from '../sim/hospResponse';
 import { computeNexusPhase, maybeSelectNexusAction, aggregateNexusEffects, NEXUS_ACTION_CATALOG } from '../sim/nexusActions';
 import { generateNexusEventText } from '../events/nexusEvents';
+import { computeGameEndStats } from '../sim/scoring';
+import { checkMilestones } from '../sim/milestones';
 
 type Actions = {
   setSpeed: (s: 1 | 3 | 10) => void;
@@ -59,9 +61,9 @@ let __simAccMs = 0;
 let __pickupId = 1;
 
 const PACING_PRESETS = {
-  slow: { msPerDay: 12_000, bubbleSpawnMs: 10_000 },
-  normal: { msPerDay: 8_000, bubbleSpawnMs: 7_200 },
-  fast: { msPerDay: 5_000, bubbleSpawnMs: 4_500 },
+  slow: { msPerDay: 12_000, bubbleSpawnMs: 15_000 },
+  normal: { msPerDay: 8_000, bubbleSpawnMs: 11_000 },
+  fast: { msPerDay: 5_000, bubbleSpawnMs: 7_000 },
 } as const satisfies Record<'slow'|'normal'|'fast', { msPerDay: number; bubbleSpawnMs: number }>;
 
 const BORO_IDS = ['manhattan', 'brooklyn', 'queens', 'bronx', 'staten_island'] as const satisfies readonly CountryID[];
@@ -288,10 +290,10 @@ function baseParams(): Params {
     symContactMul: 0.7,
     severityMobilityFactor: 0.5,
     // early-game pacing: short grace and gradual ramp
-    startRampDelayDays: 6,
-    startRampDurationDays: 35,
-    earlyPointBoostDays: 18,
-    earlyPointBoostMul: 1.6,
+    startRampDelayDays: 3,
+    startRampDurationDays: 18,
+    earlyPointBoostDays: 10,
+    earlyPointBoostMul: 2.0,
   };
 }
 
@@ -308,8 +310,8 @@ function paramsForType(type: PathogenType): Params {
     p.gammaRec *= 0.75;
     p.muBase *= 0.9;
     p.importationPerDay *= 0.7;
-    p.startRampDelayDays = 7;
-    p.startRampDurationDays = 42;
+    p.startRampDelayDays = 4;
+    p.startRampDurationDays = 24;
     return p;
   }
   if (type === 'fungus') {
@@ -320,8 +322,8 @@ function paramsForType(type: PathogenType): Params {
     p.importationPerDay = 0;
     p.mobilityScale *= 0.9;
     p.symFrac = Math.min(0.8, p.symFrac * 0.8);
-    p.startRampDelayDays = 5;
-    p.startRampDurationDays = 28;
+    p.startRampDelayDays = 3;
+    p.startRampDurationDays = 15;
     return p;
   }
   // bioweapon
@@ -331,8 +333,8 @@ function paramsForType(type: PathogenType): Params {
   p.muBase *= 2.0;
   p.hospRate *= 1.15;
   p.importationPerDay *= 0.5;
-  p.startRampDelayDays = 4;
-  p.startRampDurationDays = 22;
+  p.startRampDelayDays = 2;
+  p.startRampDurationDays = 12;
   return p;
 }
 
@@ -617,7 +619,7 @@ const MAX_EVENTS = 120;
 const MAX_BANKED_PICKUPS = 8;
 
 const initialAutoCollect = (() => {
-  try { return localStorage.getItem('autoCollectBubblesV1') === '1'; } catch { return false; }
+  try { const v = localStorage.getItem('autoCollectBubblesV1'); return v === null ? true : v === '1'; } catch { return true; }
 })();
 
 // Radiation-model-inspired commuting flows across the five boroughs
@@ -702,6 +704,11 @@ export const useGameStore = create<GameStore>()(
     aiDirector: createAiDirectorState(Date.now(), false),
     activeEmergencyEffects: [],
     emergencyCooldowns: {},
+    gameResult: null,
+    milestonesTriggered: [],
+    pauseReason: null,
+    autoPauseEnabled: true,
+    emergencyUnlocked: false,
     mutationDebt: 0,
     antibioticResistance: 0,
     fungusBurstDaysLeft: 0,
@@ -723,11 +730,13 @@ export const useGameStore = create<GameStore>()(
         // choose a starting location/focus. This is the real "game start" gate.
         if (st.paused && st.awaitingPatientZero) return;
         st.paused = !st.paused;
+        if (!st.paused) st.pauseReason = null;
         if (st.paused) __simAccMs = 0; // clear leftover fractional time when pausing
       }),
       setPaused: (v) => set((st) => {
         if (!v && st.awaitingPatientZero) return;
         st.paused = v;
+        if (!v) st.pauseReason = null;
         if (st.paused) __simAccMs = 0;
       }),
       setPacing: (p) => set((st) => {
@@ -749,7 +758,7 @@ export const useGameStore = create<GameStore>()(
         if (nextEnabled) {
           // Treat enabling as a "fresh" start: wait a few in-game days before
           // calling out to the model so we have a trend signal.
-          st.aiDirector.lastEvalDay = Math.max(0, Math.floor(st.t / Math.max(1, st.msPerDay)));
+          st.aiDirector.lastEvalDay = Math.max(0, Math.floor(st.day));
           st.aiDirector.pending = false;
         } else {
           st.aiDirector.pending = false;
@@ -764,7 +773,7 @@ export const useGameStore = create<GameStore>()(
         if (ai0.pending) return;
 
         const nowMs = Date.now();
-        const dayIndex = Math.max(0, Math.floor(st0.t / Math.max(1, st0.msPerDay)));
+        const dayIndex = Math.max(0, Math.floor(st0.day));
 
         // If we've never applied a decision, treat the "last eval" as day 0 so
         // we wait a minimum amount of simulated time before the first call.
@@ -1121,7 +1130,7 @@ export const useGameStore = create<GameStore>()(
         while (__simAccMs >= stepMs && steps < maxStepsPerTick) {
           set((state) => {
             state.t += stepMs;
-            const dtDays = stepMs / state.msPerDay;
+            const dtDays = stepMs / Math.max(1, state.msPerDay);
             state.day += dtDays;
             // Early-game disease progression ramp (grace period)
             const delay = (state.params.startRampDelayDays ?? 0);
@@ -1417,8 +1426,8 @@ export const useGameStore = create<GameStore>()(
             }
 
             // daily event (integer day boundary)
-            const prevDay = Math.floor((state.t - stepMs) / state.msPerDay);
-            const nowDay = Math.floor(state.t / state.msPerDay);
+            const prevDay = Math.floor(state.day - dtDays);
+            const nowDay = Math.floor(state.day);
             if (nowDay !== prevDay) {
               // Citywide hospital response: escalate capacity/turnover when demand breaches capacity.
               // This keeps the "story curve" (peaks/valleys) from spiraling into nonsensical overload.
@@ -1439,6 +1448,11 @@ export const useGameStore = create<GameStore>()(
                   const label = HOSP_RESPONSE_TIERS[nextTier].label;
                   if (nextTier > curTier) {
                     state.events.unshift(`Hospital response escalates: ${label}`);
+                    // Auto-pause on escalation for strategic planning
+                    if (state.autoPauseEnabled && nextTier >= 2) {
+                      state.paused = true;
+                      state.pauseReason = `milestone:Hospital Crisis: ${label}|The healthcare system is escalating its response. Take a moment to review your strategy.`;
+                    }
                   } else {
                     state.events.unshift(`Hospital pressure eases: ${label}`);
                   }
@@ -1489,9 +1503,15 @@ export const useGameStore = create<GameStore>()(
 	                    endgame: 4,
 	                  };
 	                  if (PHASE_ORDER[computedPhase] > PHASE_ORDER[aiDir.phase]) {
+	                    const prevPhase = aiDir.phase;
 	                    aiDir.phase = computedPhase;
 	                    if (computedPhase !== 'dormant') {
 	                      state.events.unshift(`NEXUS phase: ${computedPhase.toUpperCase()} — threat escalation detected`);
+	                      // Auto-pause on significant NEXUS phase changes
+	                      if (state.autoPauseEnabled && (computedPhase === 'aggressive' || computedPhase === 'endgame')) {
+	                        state.paused = true;
+	                        state.pauseReason = `milestone:NEXUS: ${computedPhase.toUpperCase()} Phase|The AI adversary has escalated. ${computedPhase === 'endgame' ? 'This is the final push. Every decision counts.' : 'Expect more frequent and severe actions.'}`;
+	                      }
 	                    }
 	                  }
 
@@ -1657,8 +1677,41 @@ export const useGameStore = create<GameStore>()(
 
               try { playMilestone('day'); } catch {}
               while (state.events.length > MAX_EVENTS) state.events.pop();
-              // evaluate story objectives (simple completion only)
-              if (state.story) {
+
+              // --- Emergency action unlock check ---
+              if (!state.emergencyUnlocked) {
+                const purchasedCount = Object.values(state.upgrades).filter(u => u.purchased).length;
+                const totalCount = Object.values(state.upgrades).length;
+                const allPurchased = purchasedCount === totalCount;
+                const threshold = (purchasedCount / Math.max(1, totalCount) >= 0.5 && state.day >= 30) || state.hospResponseTier >= 2;
+                if (allPurchased || threshold) {
+                  state.emergencyUnlocked = true;
+                  state.events.unshift('Emergency actions are now available');
+                  try { playMilestone('alert'); } catch {}
+                }
+              }
+
+              // --- Milestone system ---
+              const milestone = checkMilestones(state);
+              if (milestone) {
+                state.milestonesTriggered.push(milestone.id);
+                state.events.unshift(`Milestone: ${milestone.title}`);
+                if (milestone.reward) {
+                  state.dna += milestone.reward.amount;
+                  state.events.unshift(`+${milestone.reward.amount} ${state.mode === 'architect' ? 'DNA' : 'Ops'}`);
+                }
+                if (milestone.autoPause && state.autoPauseEnabled) {
+                  state.paused = true;
+                  state.pauseReason = `milestone:${milestone.title}|${milestone.narrative}`;
+                  try { playMilestone('objective'); } catch {}
+                }
+              }
+
+              // --- Victory / Defeat evaluation ---
+              let outcome: 'victory' | 'defeat' | null = null;
+
+              // Story mode objectives
+              if (state.story && !state.gameResult) {
                 const allMet = state.story.objectives.every((o) => {
                   if (o.type === 'reach_cure') return state.cureProgress >= o.target;
                   if (o.type === 'days_survived') return state.day >= o.target;
@@ -1669,14 +1722,39 @@ export const useGameStore = create<GameStore>()(
                   }
                   return false;
                 });
-                if (allMet) {
-                  state.paused = true;
-                  state.events.unshift('Victory: Objectives completed');
-                  try { playMilestone('victory'); } catch {}
+                if (allMet) outcome = 'victory';
+              }
+
+              // Free-play win/loss (only if no story or story didn't trigger)
+              if (!state.story && !state.gameResult && !outcome) {
+                const totalD = Object.values(state.countries).reduce((s, c) => s + c.D, 0);
+                const totalActive = Object.values(state.countries).reduce((s, c) => s + c.I + c.E, 0);
+                if (state.mode === 'controller') {
+                  if (state.cureProgress >= 100) outcome = 'victory';
+                  else if (state.hospResponseTier >= 3 && totalD > totalPop * 0.02) outcome = 'defeat';
+                } else {
+                  // Architect: lose if cure reaches 100%, win if all boroughs infected and cure < 50%
+                  if (state.cureProgress >= 100) outcome = 'defeat';
+                  else if (totalActive < 10 && state.day > 30 && state.cureProgress > 50) outcome = 'defeat';
+                  const allInfected = Object.values(state.countries).every(c => c.I > 100 || c.R > c.pop * 0.1);
+                  if (allInfected && state.cureProgress < 50) outcome = 'victory';
                 }
+              }
+
+              if (outcome && !state.gameResult) {
+                state.paused = true;
+                state.gameResult = computeGameEndStats(state, outcome);
+                state.events.unshift(outcome === 'victory' ? 'Victory!' : 'Defeat.');
+                try { playMilestone(outcome === 'victory' ? 'victory' : 'day'); } catch {}
               }
             }
           });
+          // Auto-pause/gameover can be triggered inside a sim step (e.g., milestone).
+          // Stop integrating immediately so the game doesn't advance "under" the pause overlay.
+          if (get().paused) {
+            __simAccMs = 0;
+            break;
+          }
           __simAccMs -= stepMs;
           steps++;
         }
@@ -1776,12 +1854,15 @@ export const useGameStore = create<GameStore>()(
 	            t: st.t,
 	            day: st.day,
 	            paused: st.paused,
+	            pauseReason: st.pauseReason,
+	            autoPauseEnabled: st.autoPauseEnabled,
 	            awaitingPatientZero: Boolean(st.awaitingPatientZero),
 	            patientZeroSeedAmount: (st as any).patientZeroSeedAmount ?? null,
 	            speed: st.speed,
 	            msPerDay: st.msPerDay,
 	            pacing: st.pacing,
 	            bubbleSpawnMs: st.bubbleSpawnMs,
+	            autoCollectBubbles: st.autoCollectBubbles,
 	            dna: st.dna,
 	            mode: st.mode,
 	            pathogenType: st.pathogenType,
@@ -1795,6 +1876,12 @@ export const useGameStore = create<GameStore>()(
 	            cureProgress: st.cureProgress,
 	            peakI: st.peakI,
 	            story: st.story,
+	            // Meta-systems
+	            milestonesTriggered: st.milestonesTriggered,
+	            emergencyUnlocked: st.emergencyUnlocked,
+	            activeEmergencyEffects: st.activeEmergencyEffects,
+	            emergencyCooldowns: st.emergencyCooldowns,
+	            gameResult: st.gameResult,
 	            countries: st.countries,
 	            selectedCountryId: st.selectedCountryId,
 	            params: st.params,
@@ -1812,9 +1899,22 @@ export const useGameStore = create<GameStore>()(
 	          if (!raw) return;
 	          const snap = JSON.parse(raw);
 	          set((st) => {
-	            st.t = snap.t ?? st.t;
-	            st.day = snap.day ?? st.day;
-	            st.paused = snap.paused ?? st.paused;
+	            // Sanitize core clock fields; corrupt localStorage should never brick the sim.
+	            const msPerDayIn = (typeof snap.msPerDay === 'number' && Number.isFinite(snap.msPerDay) && snap.msPerDay > 500)
+	              ? snap.msPerDay
+	              : null;
+	            if (msPerDayIn) st.msPerDay = msPerDayIn;
+
+	            const tIn = (typeof snap.t === 'number' && Number.isFinite(snap.t) && snap.t >= 0) ? snap.t : null;
+	            if (tIn !== null) st.t = tIn;
+
+	            const dayIn = (typeof snap.day === 'number' && Number.isFinite(snap.day) && snap.day >= 0) ? snap.day : null;
+	            if (dayIn !== null) st.day = dayIn;
+	            else if (tIn !== null) st.day = tIn / Math.max(1, st.msPerDay);
+
+	            if (typeof snap.paused === 'boolean') st.paused = snap.paused;
+	            if (typeof snap.pauseReason === 'string' || snap.pauseReason === null) st.pauseReason = snap.pauseReason;
+	            if (typeof snap.autoPauseEnabled === 'boolean') st.autoPauseEnabled = snap.autoPauseEnabled;
 	            if (Object.prototype.hasOwnProperty.call(snap, 'awaitingPatientZero')) {
 	              st.awaitingPatientZero = Boolean((snap as any).awaitingPatientZero);
 	            } else {
@@ -1824,13 +1924,15 @@ export const useGameStore = create<GameStore>()(
 	            if (typeof (snap as any).patientZeroSeedAmount === 'number' && Number.isFinite((snap as any).patientZeroSeedAmount)) {
 	              (st as any).patientZeroSeedAmount = (snap as any).patientZeroSeedAmount;
 	            }
-	            st.speed = snap.speed ?? st.speed;
-	            st.msPerDay = snap.msPerDay ?? st.msPerDay;
-	            st.pacing = snap.pacing ?? st.pacing;
-	            st.bubbleSpawnMs = snap.bubbleSpawnMs ?? st.bubbleSpawnMs;
-            st.dna = snap.dna ?? st.dna;
-            st.countries = snap.countries ?? st.countries;
-            st.selectedCountryId = snap.selectedCountryId ?? st.selectedCountryId;
+	            if (snap.speed === 1 || snap.speed === 3 || snap.speed === 10) st.speed = snap.speed;
+	            if (snap.pacing === 'slow' || snap.pacing === 'normal' || snap.pacing === 'fast') st.pacing = snap.pacing;
+	            if (typeof snap.bubbleSpawnMs === 'number' && Number.isFinite(snap.bubbleSpawnMs) && snap.bubbleSpawnMs > 0) {
+	              st.bubbleSpawnMs = snap.bubbleSpawnMs;
+	            }
+	            if (typeof snap.autoCollectBubbles === 'boolean') st.autoCollectBubbles = snap.autoCollectBubbles;
+	            st.dna = snap.dna ?? st.dna;
+	            st.countries = snap.countries ?? st.countries;
+	            st.selectedCountryId = snap.selectedCountryId ?? st.selectedCountryId;
             st.params = snap.params ?? st.params;
             st.upgrades = snap.upgrades ?? st.upgrades;
             st.events = Array.isArray(snap.events) ? snap.events : st.events;
@@ -1869,9 +1971,32 @@ export const useGameStore = create<GameStore>()(
             st.cureProgress = snap.cureProgress ?? st.cureProgress;
             st.peakI = snap.peakI ?? st.peakI;
             st.story = snap.story ?? st.story;
-          });
-        } catch {}
-      },
+
+	            // Milestones/emergency unlocks: restore so reload doesn't re-trigger rewards or hide unlocked actions.
+	            if (Array.isArray(snap.milestonesTriggered)) {
+	              st.milestonesTriggered = snap.milestonesTriggered.filter((x: any) => typeof x === 'string');
+	            }
+	            if (typeof snap.emergencyUnlocked === 'boolean') st.emergencyUnlocked = snap.emergencyUnlocked;
+	            if (Array.isArray(snap.activeEmergencyEffects)) {
+	              st.activeEmergencyEffects = snap.activeEmergencyEffects.filter((e: any) =>
+	                e && typeof e === 'object'
+	                && typeof e.actionId === 'string'
+	                && typeof e.startDay === 'number'
+	                && typeof e.endDay === 'number'
+	              );
+	            }
+	            if (snap.emergencyCooldowns && typeof snap.emergencyCooldowns === 'object') {
+	              st.emergencyCooldowns = { ...(snap.emergencyCooldowns as any) };
+	            }
+	            if (snap.gameResult && typeof snap.gameResult === 'object') {
+	              const gr = snap.gameResult as Partial<GameEndStats>;
+	              if ((gr.outcome === 'victory' || gr.outcome === 'defeat') && typeof gr.score === 'number' && typeof gr.days === 'number') {
+	                st.gameResult = gr as GameEndStats;
+	              }
+	            }
+	          });
+	        } catch {}
+	      },
       startNewGame: (mode, opts) => set((st) => {
         // reset accumulator when starting a fresh game
         __simAccMs = 0;
@@ -1897,6 +2022,11 @@ export const useGameStore = create<GameStore>()(
         st.cordonDaysLeft = {};
         st.activeEmergencyEffects = [];
         st.emergencyCooldowns = {};
+        st.gameResult = null;
+        st.milestonesTriggered = [];
+        st.pauseReason = null;
+        st.autoPauseEnabled = true;
+        st.emergencyUnlocked = false;
         st.bankedPickups = [];
         st.cureProgress = 0;
         st.params = paramsForType(st.pathogenType);

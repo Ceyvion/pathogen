@@ -415,9 +415,21 @@ const TREATMENT = [
   "Spore decontamination crews in hazmat gear scrubbing HVAC systems across {topBoro}.",
 ];
 
+// Curated intro events that fire deterministically on the first few days
+const INTRO_EVENTS: Record<number, string> = {
+  1: "A cough echoes through the subway. Nobody notices. Yet.",
+  2: "Hospital admissions are slightly above average this week. Probably nothing.",
+  3: "A cluster of fevers in {topBoro}. The health department is investigating.",
+};
+
 export function maybeGenerateWorldEvent(st: WorldState, rng: () => number = Math.random): string | null {
   const m = computeMetrics(st);
   const ctx = makeCtx(st, m, rng);
+
+  // Fire curated intro events on days 1-3
+  const dayIndex = Math.floor(st.day);
+  const introEvent = INTRO_EVENTS[dayIndex];
+  if (introEvent) return fill(introEvent, ctx);
 
   let tier: 'early'|'watch'|'surge'|'crisis' = 'early';
   if (m.per100kI >= 250 || m.maxHospLoad >= 1.05) tier = 'crisis';

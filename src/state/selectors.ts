@@ -1,6 +1,19 @@
 import type { GameStore } from './store';
-import type { CountryID } from './types';
+import type { CountryID, CrisisTier } from './types';
 import { HOSP_RESPONSE_TIERS } from '../sim/hospResponse';
+
+export function selectCrisisTier(st: GameStore): CrisisTier {
+  const countries = Object.values(st.countries);
+  const totalPop = countries.reduce((s, c) => s + c.pop, 0);
+  const totalI = countries.reduce((s, c) => s + c.I, 0);
+  const per100k = (totalI / Math.max(1, totalPop)) * 100_000;
+  const hospTier = st.hospResponseTier;
+
+  if (per100k > 500 || hospTier >= 3) return 'crisis';
+  if (per100k > 200 || hospTier >= 2) return 'surge';
+  if (per100k > 50 || hospTier >= 1) return 'watch';
+  return 'calm';
+}
 
 export type ISLMetrics = { infectivity: number; severity: number; lethality: number };
 

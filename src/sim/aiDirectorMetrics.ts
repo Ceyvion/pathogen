@@ -40,7 +40,9 @@ export function computeVirusDirectorSnapshot(state: WorldState): AiDirectorDaySn
     if (load > hospLoad) hospLoad = load;
   }
 
-  const dayIndex = Math.max(0, Math.floor(state.t / Math.max(1, state.msPerDay)));
+  // `state.day` is the authoritative in-game time. Deriving a day index from
+  // `t / msPerDay` breaks when pacing changes (it retroactively reinterprets `t`).
+  const dayIndex = Math.max(0, Math.floor(state.day));
   const intensity = computeIntensity({ per100k, hospLoad });
 
   return {

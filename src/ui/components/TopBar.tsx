@@ -6,7 +6,7 @@ import { Wrench, PanelLeft, PanelRight } from 'lucide-react';
 export function TopBar() {
   const speed = useGameStore((s) => s.speed);
   const paused = useGameStore((s) => s.paused);
-  const day = useGameStore((s) => Math.floor(s.t / s.msPerDay));
+  const day = useGameStore((s) => Math.floor(s.day));
   const mode = useGameStore((s) => s.mode);
   const pathogenType = useGameStore((s) => s.pathogenType);
   const cure = useGameStore((s) => s.cureProgress);

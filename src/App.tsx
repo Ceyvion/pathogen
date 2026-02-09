@@ -4,6 +4,7 @@ import { Hud } from './ui/Hud';
 import { NycMap } from './map/NycMap';
 import { TitleScreen } from './ui/screens/TitleScreen';
 import { SetupScreen } from './ui/screens/SetupScreen';
+import { GameOverScreen } from './ui/screens/GameOverScreen';
 import { useUiStore } from './state/ui';
 import { BootVideo } from './ui/components/BootVideo';
 import { useGameStore } from './state/store';
@@ -47,6 +48,8 @@ export default function App() {
         <TitleScreen />
       ) : scene === 'setup' ? (
         <SetupScreen />
+      ) : scene === 'gameover' ? (
+        <GameOverScreen />
       ) : (
         <>
           <NycMap />

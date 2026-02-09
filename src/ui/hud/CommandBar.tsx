@@ -2,15 +2,34 @@ import React, { useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { useGameStore } from '../../state/store';
 import { useUiStore } from '../../state/ui';
+import { selectCrisisTier } from '../../state/selectors';
 import { Tooltip } from '../system/Tooltip';
 import { Switch } from '../system/Switch';
 import { SeparatorHorizontal, Play, Pause, GaugeCircle, Film, Rocket, RotateCcw, CloudMoon, Palette, Music2, VolumeX, SkipForward, LayoutPanelLeft, Zap, SunMoon } from 'lucide-react';
 import * as bgm from '../../audio/bgm';
 
+type GameSpeed = 'crawl' | 'slow' | 'normal' | 'fast' | 'blitz';
+
+const GAME_SPEED_CONFIG: Record<GameSpeed, { speed: 1|3|10; pacing: 'slow'|'normal'|'fast'; label: string }> = {
+  crawl:  { speed: 1,  pacing: 'slow',   label: '0.5x' },
+  slow:   { speed: 1,  pacing: 'normal', label: '1x' },
+  normal: { speed: 3,  pacing: 'normal', label: '3x' },
+  fast:   { speed: 3,  pacing: 'fast',   label: '5x' },
+  blitz:  { speed: 10, pacing: 'fast',   label: '10x' },
+};
+
+function resolveGameSpeed(speed: 1|3|10, pacing: 'slow'|'normal'|'fast'): GameSpeed {
+  if (speed === 1 && pacing === 'slow') return 'crawl';
+  if (speed === 1) return 'slow';
+  if (speed === 3 && pacing === 'fast') return 'fast';
+  if (speed === 3) return 'normal';
+  return 'blitz';
+}
+
 export function CommandBar() {
   const speed = useGameStore((s) => s.speed);
   const paused = useGameStore((s) => s.paused);
-  const day = useGameStore((s) => Math.floor(s.t / s.msPerDay));
+  const day = useGameStore((s) => Math.floor(s.day));
   const secPerDay = useGameStore((s) => s.msPerDay / 1000);
   const mode = useGameStore((s) => s.mode);
   const pathogenType = useGameStore((s) => s.pathogenType);
@@ -18,6 +37,14 @@ export function CommandBar() {
   const autoCollect = useGameStore((s) => s.autoCollectBubbles);
   const actions = useGameStore((s) => s.actions);
   const pacing = useGameStore((s) => s.pacing);
+  const crisisTier = useGameStore(selectCrisisTier);
+  const gameSpeed = resolveGameSpeed(speed, pacing);
+
+  const setGameSpeed = (gs: GameSpeed) => {
+    const cfg = GAME_SPEED_CONFIG[gs];
+    actions.setSpeed(cfg.speed);
+    actions.setPacing(cfg.pacing);
+  };
 
   const toggleStats = useUiStore((s) => s.toggleStats);
   const toggleUpgrades = useUiStore((s) => s.toggleUpgrades);
@@ -53,18 +80,18 @@ export function CommandBar() {
   }, []);
 
   useEffect(() => {
+    const speeds: GameSpeed[] = ['crawl', 'slow', 'normal', 'fast', 'blitz'];
     const onKey = (e: KeyboardEvent) => {
       if (e.key === ' ') { e.preventDefault(); actions.togglePause(); }
-      if (e.key === '1') actions.setSpeed(1);
-      if (e.key === '2') actions.setSpeed(3);
-      if (e.key === '3') actions.setSpeed(10);
+      const idx = Number(e.key) - 1;
+      if (idx >= 0 && idx < speeds.length) setGameSpeed(speeds[idx]);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [actions]);
 
   return (
-    <motion.div className="cmd-bar panel glass" aria-label="command bar"
+    <motion.div className="cmd-bar panel glass" aria-label="command bar" data-crisis={crisisTier}
       onMouseEnter={() => setHudHovering(true)}
       onMouseLeave={() => setHudHovering(false)}
       initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} transition={{ type: 'spring', stiffness: 220, damping: 26 }}
@@ -78,21 +105,13 @@ export function CommandBar() {
           <div className="progress-track"><div className="progress-fill" style={{ width: `${Math.min(100, cure).toFixed(1)}%` }} /></div>
           <div className="progress-label">Cure {cure.toFixed(1)}%</div>
         </div>
-        <div className="seg-controls" role="group" aria-label="speed controls">
-          <button className={`seg ${!paused && speed === 1 ? 'active' : ''}`} onClick={() => actions.setSpeed(1)}>1×</button>
-          <button className={`seg ${!paused && speed === 3 ? 'active' : ''}`} onClick={() => actions.setSpeed(3)}>3×</button>
-          <button className={`seg ${!paused && speed === 10 ? 'active' : ''}`} onClick={() => actions.setSpeed(10)}>10×</button>
+        <div className="seg-controls" role="group" aria-label="speed controls" title={`~${secPerDay.toFixed(1)}s per in-game day at current speed`}>
+          {(Object.keys(GAME_SPEED_CONFIG) as GameSpeed[]).map((gs) => (
+            <button key={gs} className={`seg ${!paused && gameSpeed === gs ? 'active' : ''}`} onClick={() => setGameSpeed(gs)}>
+              {GAME_SPEED_CONFIG[gs].label}
+            </button>
+          ))}
           <button className={`seg`} onClick={actions.togglePause}>{paused ? <><Play size={14}/> Resume</> : <><Pause size={14}/> Pause</>}</button>
-        </div>
-        <div
-          className="seg-controls"
-          role="group"
-          aria-label="pacing controls"
-          title={`Pacing controls how fast in-game days pass. Current: ~${secPerDay.toFixed(1)}s per day at 1×.`}
-        >
-          <button className={`seg ${pacing === 'slow' ? 'active' : ''}`} onClick={() => actions.setPacing('slow')}>Slow</button>
-          <button className={`seg ${pacing === 'normal' ? 'active' : ''}`} onClick={() => actions.setPacing('normal')}>Normal</button>
-          <button className={`seg ${pacing === 'fast' ? 'active' : ''}`} onClick={() => actions.setPacing('fast')}>Fast</button>
         </div>
       </div>
       <div className="cmd-right">

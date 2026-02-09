@@ -20,6 +20,22 @@ import { EventToasts } from './components/EventToasts';
 import { PickupTray } from './components/PickupTray';
 import { OnboardingToasts } from './components/OnboardingToasts';
 import { HospitalModal } from './components/HospitalModal';
+import { MilestoneCard } from './components/MilestoneCard';
+import { TutorialOverlay } from './components/TutorialOverlay';
+import { useGameStore } from '../state/store';
+
+function GameOverTransition() {
+  const gameResult = useGameStore((s) => s.gameResult);
+  const toGameOver = useUiStore((s) => s.toGameOver);
+  const transitioned = React.useRef(false);
+  React.useEffect(() => {
+    if (!gameResult || transitioned.current) return;
+    transitioned.current = true;
+    const timer = setTimeout(() => toGameOver(), 2500);
+    return () => clearTimeout(timer);
+  }, [gameResult, toGameOver]);
+  return null;
+}
 
 export function Hud() {
   const showStats = useUiStore((s) => s.showStats);
@@ -50,6 +66,9 @@ export function Hud() {
         <StorySplash />
         <OnboardingToasts />
         <EventToasts />
+        <MilestoneCard />
+        <TutorialOverlay />
+        <GameOverTransition />
       </div>
     </ToasterProvider>
   );
